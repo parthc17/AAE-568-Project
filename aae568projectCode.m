@@ -1,6 +1,6 @@
 % AAE 568 Project Script
 
-% Part 1 - Obtain trajectory around asteroid
+% Part 1 - Obtain trajectory around asteroid Bennu
 
 % Constants
 muBennu = 5.2; % m^3/s^2
@@ -60,8 +60,35 @@ for i = 1:length(t)
 
 end
 
-figure; plot3(y(:,1),y(:,2),y(:,3))
-figure; plot3(xHat(1,:),xHat(2,:),xHat(3,:))
+% Plot True Dynamics
+figure; plot3(y(:,1),y(:,2),y(:,3)); hold on;
+fv = stlread('g_06290mm_spc_obj_0000n00000_v008.stl');
+% Visualize correctly
+pp = patch('Faces', fv.ConnectivityList, ...
+          'Vertices', fv.Points, ...
+          'FaceColor', [0.8 0.8 0.8], ...
+          'EdgeColor', 'none', ...
+          'FaceLighting', 'gouraud');
+% Adjust view
+axis equal
+camlight headlight
+xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)'); title('Asteroid Orbit Control'); 
+
+% Plot EKF Results
+figure; plot3(xHat(1,:),xHat(2,:),xHat(3,:)); hold on;
+fv = stlread('g_06290mm_spc_obj_0000n00000_v008.stl');
+% Visualize correctly
+pp = patch('Faces', fv.ConnectivityList, ...
+          'Vertices', fv.Points, ...
+          'FaceColor', [0.8 0.8 0.8], ...
+          'EdgeColor', 'none', ...
+          'FaceLighting', 'gouraud');
+% Adjust view
+axis equal
+camlight headlight
+xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)'); title('Asteroid Orbit Control'); 
+
+% Plot Differences between Truth and EKF
 figure;
 subplot(3,1,1); plot(t,y(:,1) - xHat(1,:)')
 subplot(3,1,2); plot(t,y(:,2) - xHat(2,:)')
