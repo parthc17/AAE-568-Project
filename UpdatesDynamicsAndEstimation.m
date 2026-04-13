@@ -164,7 +164,7 @@ for i = 1:length(t)-1
 end
 
 % initialize first entries for plotting consistency
-meas_hist(:,1) = xhat(1:3,1);
+meas_hist(:,1) = xHat(1:3,1);
 Pxx(1) = cov0(1,1);
 Pyy(1) = cov0(2,2);
 Pzz(1) = cov0(3,3);
