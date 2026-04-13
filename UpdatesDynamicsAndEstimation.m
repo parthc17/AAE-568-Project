@@ -20,6 +20,13 @@ predicted state over measured state.
 - Added process noise to truth trajectory to simulate unmodeled/unknown
 perturbations in acceleration
 - Satellite only takes measurements once every 5 minutes
+AIDAN EDITS 4/12: 
+- EKF Moved into a function so that other estimators can be added
+- Added a secondary estimator that takes multiple measurements each time,
+and then uses weighted batch least squares estimator to improve the
+measurement, which is then used in the EKF
+- Increased noise 
+- Changed up some plots
 -------------------------------------------------------------------------
 %}
 
@@ -89,7 +96,7 @@ dt = 100; %sec
 time = 0:dt:(21.55*86400); %Roughly time until impact, uncontrolled
 period = 2*pi*sqrt(orbit.a^3/muBennu) / 86400;
 
-% Truth Propagation
+%% Truth Propagation------------------------------------------------------
 sig_a_truth = 1e-7;   % Process Noise, m/s^2, tune this
 yTruth = zeros(length(time),42);
 yTruth(1,:) = [r0; v0; reshape(eye(6),[36 1])]';
@@ -109,7 +116,8 @@ end
 t = time(:);
 y = yTruth;
 
-sig = 1; %Standard Dev of Random noise, arbitrarily selected
+%% Estimation Setup------------------------------------------------------
+sig = 2; %Standard Dev of Random noise, arbitrarily selected
 
 H = [eye(3) zeros(3,3)]; %We can measure x, y, z
 Q = diag([1e-6, 1e-6, 1e-6, 1e-10, 1e-10, 1e-10]); %Tune This, Currently set for placing emphasis predicted states over measured states
@@ -123,204 +131,200 @@ Parr(:,:,1) = cov0;
 xHat = zeros(6,length(t));
 xHat(:,1) = [r0+ sig*randn(3,1); v0+ sig*randn(3,1)]; %Our initial estimate has some noise
 
-for i = 1:length(t)-1
-    % Current updated covariance/state
-    P = Parr(:,:,i);
-    xPlus = xHat(:,i);
 
-    % --- Prediction step ---
-    % Propagate estimated state over one time step, together with STM
-    % This way our predictions are based off previous estimates
-    xAug0 = [xPlus; reshape(eye(6),[36 1])];
-    [~, yProp] = ode45(@(tt,xx) bennuProp(tt,xx,muBennu), [t(i) t(i+1)], xAug0, opts);
+%% ESTIMATION ----------------------------------------------------------
 
-    xBar = yProp(end,1:6)';                     % predicted state
-    phi  = reshape(yProp(end,7:42),[6 6]);     % predicted STM from estimated state
-    PBar = phi*P*phi' + Q;                      % predicted error covariance
+Estimate = EKF(t, Parr, xHat, y, H, Q, R, sig, cov0, muBennu, opts);
+Estimate_BLS = EKF_BLS(t, Parr, xHat, y, H, Q, R, sig, cov0, muBennu, opts);
 
-    % --- Measurement update ---
-    if mod(i,3) == 0   % measurement every 300 s since dt = 100 s
-        meas = y(i+1,1:3)' + sig*randn(3,1); %Measurements are true location + noise
-        meas_hist(:,i+1) = meas;            
+%NORMAL EKF METHOD
+xHat = Estimate(1:6, :);
+meas_hist = Estimate(7:9, :);
+Pxx = Estimate(10,:);
+Pyy = Estimate(11,:);
+Pzz = Estimate(12,:);
 
-        b = meas - H*xBar;
-        K = PBar * H' / (H*PBar*H' + R);    %Kalman gains
-
-        xHat(:,i+1) = xBar + K*b;           %Uses prediction and measurement
-        Phat(:,:,i+1) = PBar - K*H*PBar;    %Uses prediction and measurement
-    else
-        meas_hist(:,i+1) = [NaN; NaN; NaN];   % no measurement this step
-
-        xHat(:,i+1) = xBar;       % prediction only
-        Phat(:,:,i+1) = PBar;     % covariance prediction only
-    end
-
-    Pxx(i+1) = Phat(1,1,i+1);
-    Pyy(i+1) = Phat(2,2,i+1);
-    Pzz(i+1) = Phat(3,3,i+1);
-
-    % carry updated covariance forward
-    Parr(:,:,i+1) = Phat(:,:,i+1);
-end
-
-% initialize first entries for plotting consistency
-meas_hist(:,1) = xHat(1:3,1);
-Pxx(1) = cov0(1,1);
-Pyy(1) = cov0(2,2);
-Pzz(1) = cov0(3,3);
+%EKF + BLS METHOD
+xHat_BLS = Estimate_BLS(1:6, :);
+meas_hist_BLS = Estimate_BLS(7:9, :);
+Pxx_BLS = Estimate_BLS(10,:);
+Pyy_BLS = Estimate_BLS(11,:);
+Pzz_BLS = Estimate_BLS(12,:);
+%------------------------------------------------------------------------
 
 
-% Plot EKF Results against Truth Results---------------------------------
-figure; plot3(xHat(1,:),xHat(2,:),xHat(3,:)); hold on;
-plot3(y(:,1),y(:,2),y(:,3));
+%% Plotting -------------------------------------------------------------
+
+% Precompute useful error quantities
+err_EKF     = y(:,1:3)' - xHat(1:3,:);
+err_BLS     = y(:,1:3)' - xHat_BLS(1:3,:);
+err_meas    = y(:,1:3)' - meas_hist;
+err_measBLS = y(:,1:3)' - meas_hist_BLS;
+
+errNorm_EKF = vecnorm(err_EKF);
+errNorm_BLS = vecnorm(err_BLS);
+
+sig3_EKF = 3*[sqrt(Pxx); sqrt(Pyy); sqrt(Pzz)];
+sig3_BLS = 3*[sqrt(Pxx_BLS); sqrt(Pyy_BLS); sqrt(Pzz_BLS)];
+
+%% 1) 3D Trajectory Comparison
+figure;
+plot3(y(:,1), y(:,2), y(:,3), 'k-', 'LineWidth', 1.6); hold on;
+plot3(xHat(1,:), xHat(2,:), xHat(3,:), 'b--', 'LineWidth', 1.3);
+plot3(xHat_BLS(1,:), xHat_BLS(2,:), xHat_BLS(3,:), 'r-.', 'LineWidth', 1.3);
+
 fv = stlread('g_06290mm_spc_obj_0000n00000_v008.stl');
-% Visualize correctly
-pp = patch('Faces', fv.ConnectivityList, ...
-          'Vertices', fv.Points, ...
-          'FaceColor', [0.8 0.8 0.8], ...
-          'EdgeColor', 'none', ...
-          'FaceLighting', 'gouraud');
-% Adjust view
+patch('Faces', fv.ConnectivityList, ...
+      'Vertices', fv.Points, ...
+      'FaceColor', [0.8 0.8 0.8], ...
+      'EdgeColor', 'none', ...
+      'FaceLighting', 'gouraud');
+
 axis equal
+grid on
 camlight headlight
-xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)'); title('Estimated Trajectory'); 
-legend('Estimate', 'Truth')
-
-% Plot Differences between Truth and EKF------------------------------------
-figure;
-subplot(3,1,1);
-plot(t, y(:,1) - xHat(1,:)', 'LineWidth', 1.2);
-grid on
-xlabel('Time (s)');
-ylabel('X Error (m)');
-title('Position Estimation Error in X');
-
-subplot(3,1,2);
-plot(t, y(:,2) - xHat(2,:)', 'LineWidth', 1.2);
-grid on
-xlabel('Time (s)');
-ylabel('Y Error (m)');
-title('Position Estimation Error in Y');
-
-subplot(3,1,3);
-plot(t, y(:,3) - xHat(3,:)', 'LineWidth', 1.2);
-grid on
-xlabel('Time (s)');
-ylabel('Z Error (m)');
-title('Position Estimation Error in Z');
-
-sgtitle('Truth Minus EKF Estimate Position Errors');
-
-% Plot Differences between Truth, Estimation, and Measurements-------------
-figure;
-subplot(3,1,1);
-hold on;
-scatter(t, y(:,1)' - meas_hist(1,:), 15, 'filled')
-plot(t, y(:,1)' - xHat(1,:),'LineWidth', 1.5)
-grid on
-xlabel('Time (s)');
-ylabel('Error (m)');
-title('Error in X');
-legend('Truth - Measurement', 'Truth - Estimate')
-
-subplot(3,1,2);
-hold on;
-scatter(t, y(:,2)' - meas_hist(2,:), 15, 'filled')
-plot(t, y(:,2)' - xHat(2,:),'LineWidth', 1.5)
-grid on
-xlabel('Time (s)');
-ylabel('Error (m)');
-title('Error in Y');
-legend('Truth - Measurement', 'Truth - Estimate')
-
-subplot(3,1,3);
-hold on;
-scatter(t, y(:,3)' - meas_hist(3,:), 15, 'filled')
-plot(t, y(:,3)' - xHat(3,:),'LineWidth', 1.5)
-grid on
-xlabel('Time (s)');
-ylabel('Error (m)');
-title('Error in Z');
-legend('Truth - Measurement', 'Truth - Estimate')
-
-sgtitle('Truth vs Estimate vs Measurement');
-
-% Plot sigma bounds
-figure;
-subplot(3,1,1);
-plot(t, xHat(1,:), 'LineWidth', 1.2); hold on;
-plot(t, xHat(1,:) + 3*sqrt(Pxx), '--', 'LineWidth', 1.2);
-plot(t, xHat(1,:) - 3*sqrt(Pxx), '--', 'LineWidth', 1.2);
-grid on
-xlabel('Time (s)');
-ylabel('X Position (m)');
-title('Estimated X Position with \pm3\sigma Bounds');
-legend('Estimated X', '+3\sigma', '-3\sigma', 'Location', 'best');
-
-subplot(3,1,2);
-plot(t, xHat(2,:), 'LineWidth', 1.2); hold on;
-plot(t, xHat(2,:) + 3*sqrt(Pyy), '--', 'LineWidth', 1.2);
-plot(t, xHat(2,:) - 3*sqrt(Pyy), '--', 'LineWidth', 1.2);
-grid on
-xlabel('Time (s)');
+xlabel('X Position (m)');
 ylabel('Y Position (m)');
-title('Estimated Y Position with \pm3\sigma Bounds');
-legend('Estimated Y', '+3\sigma', '-3\sigma', 'Location', 'best');
+zlabel('Z Position (m)');
+title('Truth and Estimated Trajectories Around Bennu');
+legend('Truth', 'EKF', 'EKF + BLS', 'Bennu Shape', 'Location', 'best');
 
-subplot(3,1,3);
-plot(t, xHat(3,:), 'LineWidth', 1.2); hold on;
-plot(t, xHat(3,:) + 3*sqrt(Pzz), '--', 'LineWidth', 1.2);
-plot(t, xHat(3,:) - 3*sqrt(Pzz), '--', 'LineWidth', 1.2);
-grid on
-xlabel('Time (s)');
-ylabel('Z Position (m)');
-title('Estimated Z Position with \pm3\sigma Bounds');
-legend('Estimated Z', '+3\sigma', '-3\sigma', 'Location', 'best');
-
-sgtitle('EKF Estimated Position Components with \pm3\sigma Covariance Bounds');
-
-%ANIMATION---------------------------------------------------------------
-figure()
-axis equal
-comet3(y(:,1), y(:,2), y(:,3))
-
-%Error Covariance Plot--------------------------------------------------
+%% 2) Position Estimation Error Components
 figure;
-subplot(3,1,1);
-plot(t, Pxx, 'LineWidth', 1.2);
+labels = {'X Error (m)', 'Y Error (m)', 'Z Error (m)'};
+titles = {'Position Error in X', 'Position Error in Y', 'Position Error in Z'};
+
+for k = 1:3
+    subplot(3,1,k)
+    plot(t, err_EKF(k,:), 'b-', 'LineWidth', 1.3); hold on;
+    plot(t, err_BLS(k,:), 'r--', 'LineWidth', 1.3);
+    yline(0,'k:');
+    grid on
+    xlabel('Time (s)');
+    ylabel(labels{k});
+    title(titles{k});
+    legend('EKF', 'EKF + BLS', 'Zero Error', 'Location', 'best');
+end
+sgtitle('Componentwise Position Estimation Errors');
+
+%% 3) Measurement Error vs Estimate Error
+figure;
+for k = 1:3
+    subplot(3,1,k)
+    scatter(t, err_meas(k,:), 10, 'b', 'filled'); hold on;
+    scatter(t, err_measBLS(k,:), 10, 'r', 'filled');
+    plot(t, err_EKF(k,:), 'b-', 'LineWidth', 1.4);
+    plot(t, err_BLS(k,:), 'r-', 'LineWidth', 1.4);
+    yline(0,'k:');
+    grid on
+    xlabel('Time (s)');
+    ylabel(labels{k});
+    title(['Measurement and Estimation Error in ', char('X'+k-1)]);
+    legend('Raw Meas Error (EKF)', 'BLS Meas Error', ...
+           'Est Error (EKF)', 'Est Error (EKF+BLS)', ...
+           'Zero Error', 'Location', 'best');
+end
+sgtitle('Measurement Errors vs Filtered Estimation Errors');
+
+%% 4) Error Norm Comparison
+figure;
+plot(t, errNorm_EKF, 'b-', 'LineWidth', 1.6); hold on;
+plot(t, errNorm_BLS, 'r--', 'LineWidth', 1.6);
 grid on
 xlabel('Time (s)');
-ylabel('X Error Cov');
+ylabel('Position Error Norm (m)');
+title('Norm of Position Estimation Error');
+legend('EKF', 'EKF + BLS', 'Location', 'best');
+
+%% 5) Improvement of EKF+BLS over EKF
+figure;
+plot(t, errNorm_EKF - errNorm_BLS, 'k', 'LineWidth', 1.5);
+yline(0,'r--','LineWidth',1.2);
+grid on
+xlabel('Time (s)');
+ylabel('\Delta Error Norm (m)');
+title('Improvement from EKF+BLS Relative to EKF');
+legend('EKF Error Norm - EKF+BLS Error Norm', 'Equal Performance', 'Location', 'best');
+
+%% 6) True Error vs 3-Sigma Bounds (Consistency Check)
+figure;
+for k = 1:3
+    subplot(3,1,k)
+    plot(t, err_EKF(k,:), 'b-', 'LineWidth', 1.2); hold on;
+    plot(t,  sig3_EKF(k,:), 'b--', 'LineWidth', 1.1);
+    plot(t, -sig3_EKF(k,:), 'b--', 'LineWidth', 1.1);
+
+    plot(t, err_BLS(k,:), 'r-', 'LineWidth', 1.2);
+    plot(t,  sig3_BLS(k,:), 'r--', 'LineWidth', 1.1);
+    plot(t, -sig3_BLS(k,:), 'r--', 'LineWidth', 1.1);
+
+    yline(0,'k:');
+    grid on
+    xlabel('Time (s)');
+    ylabel(labels{k});
+    title(['Error and 3\sigma Bounds in ', char('X'+k-1)]);
+    legend('EKF Error', 'EKF +3\sigma', 'EKF -3\sigma', ...
+           'EKF+BLS Error', 'BLS +3\sigma', 'BLS -3\sigma', ...
+           'Zero Error', 'Location', 'best');
+end
+sgtitle('Consistency Check: Actual Error vs Predicted 3\sigma Bounds');
+
+%% 7) Covariance Comparison Only
+figure;
+subplot(3,1,1)
+plot(t, Pxx, 'b-', 'LineWidth', 1.3); hold on;
+plot(t, Pxx_BLS, 'r--', 'LineWidth', 1.3);
+grid on
+xlabel('Time (s)');
+ylabel('Variance (m^2)');
 title('X Error Covariance');
+legend('EKF', 'EKF+BLS', 'Location', 'best');
 
-subplot(3,1,2);
-plot(t, Pyy, 'LineWidth', 1.2);
+subplot(3,1,2)
+plot(t, Pyy, 'b-', 'LineWidth', 1.3); hold on;
+plot(t, Pyy_BLS, 'r--', 'LineWidth', 1.3);
 grid on
 xlabel('Time (s)');
-ylabel('Y Error Cov');
+ylabel('Variance (m^2)');
 title('Y Error Covariance');
+legend('EKF', 'EKF+BLS', 'Location', 'best');
 
-subplot(3,1,3);
-plot(t, Pzz, 'LineWidth', 1.2);
+subplot(3,1,3)
+plot(t, Pzz, 'b-', 'LineWidth', 1.3); hold on;
+plot(t, Pzz_BLS, 'r--', 'LineWidth', 1.3);
 grid on
 xlabel('Time (s)');
-ylabel('Z Error Cov');
+ylabel('Variance (m^2)');
 title('Z Error Covariance');
+legend('EKF', 'EKF+BLS', 'Location', 'best');
 
-sgtitle('Error Covariance vs Time');
+sgtitle('Estimated Error Covariance Comparison');
 
-%Error Plot-------------------------------------------------------------
-figure()
-plot(t, vecnorm(y(:,1:3)'-xHat(1:3, :)));
-grid()
-title("Norm of Estimation Error")
-xlabel("Time")
-ylabel("Error Norm")
+%% 8) RMS Summary in Command Window
+measErrNorm_EKF = sqrt(sum(err_meas.^2, 1, 'omitnan'));
+measErrNorm_BLS = sqrt(sum(err_measBLS.^2, 1, 'omitnan'));
 
-%% Transfer
+% Remove times where there was no measurement at all
+measErrNorm_EKF = measErrNorm_EKF(~isnan(measErrNorm_EKF));
+measErrNorm_BLS = measErrNorm_BLS(~isnan(measErrNorm_BLS));
 
-%% Functions
+rms_meas_EKF  = sqrt(mean(measErrNorm_EKF.^2));
+rms_meas_BLS  = sqrt(mean(measErrNorm_BLS.^2));
+rms_est_EKF   = sqrt(mean(errNorm_EKF(7:size(t,1)).^2)); %Removed the errors before our first measurement since it was skewing the error dramatically
+rms_est_BLS   = sqrt(mean(errNorm_BLS(7:size(t,1)).^2)); %Removed the errors before our first measurement since it was skewing the error dramatically
 
+fprintf('\n------ RMS Error Summary ------\n');
+fprintf('Raw Measurement RMS Error (EKF):      %.4f m\n', rms_meas_EKF);
+fprintf('BLS Measurement RMS Error:            %.4f m\n', rms_meas_BLS);
+fprintf('EKF Estimate RMS Error:               %.4f m\n', rms_est_EKF);
+fprintf('EKF + BLS Estimate RMS Error:         %.4f m\n', rms_est_BLS);
+fprintf('RMS Improvement from BLS:             %.4f m\n', rms_est_EKF - rms_est_BLS);
+fprintf('Percent Improvement from BLS:         %.2f %%\n', ...
+    100*(rms_est_EKF - rms_est_BLS)/rms_est_EKF);
+
+%% Functions---------------------------------------------------------------
+%--------------------------------------------------------------------------
+%Dynamics
 function dx = bennuProp(t,x,muBody,aNoise)
     if nargin < 4
         aNoise = [0;0;0];
@@ -381,6 +385,125 @@ function dx = bennuProp(t,x,muBody,aNoise)
     
     dx = [x(4:6); a; reshape(phiDot, [36 1])];
 
+end
+
+%Normal EKF Estimator
+function estimate = EKF(t, Parr, xHat, y, H, Q, R, sig, cov0, muBennu, opts)
+    for i = 1:length(t)-1
+        % Current updated covariance/state
+        P = Parr(:,:,i);
+        xPlus = xHat(:,i);
+
+        % --- Prediction step ---
+        % Propagate estimated state over one time step, together with STM
+        % This way our predictions are based off previous estimates
+        xAug0 = [xPlus; reshape(eye(6),[36 1])];
+        [~, yProp] = ode45(@(tt,xx) bennuProp(tt,xx,muBennu), [t(i) t(i+1)], xAug0, opts);
+
+        xBar = yProp(end,1:6)';                     % predicted state
+        phi  = reshape(yProp(end,7:42),[6 6]);     % predicted STM from estimated state
+        PBar = phi*P*phi' + Q;                      % predicted error covariance
+
+        % --- Measurement update ---
+        if mod(i,6) == 0   % measurement every 10 min since dt = 100 s
+            meas = y(i+1,1:3)' + sig*randn(3,1); %Measurements are true location + noise
+            meas_hist(:,i+1) = meas;
+
+            b = meas - H*xBar;
+            K = PBar * H' / (H*PBar*H' + R);    %Kalman gains
+
+            xHat(:,i+1) = xBar + K*b;           %Uses prediction and measurement
+            Phat(:,:,i+1) = PBar - K*H*PBar;    %Uses prediction and measurement
+        else
+            meas_hist(:,i+1) = [NaN; NaN; NaN];   % no measurement this step
+
+            xHat(:,i+1) = xBar;       % prediction only
+            Phat(:,:,i+1) = PBar;     % covariance prediction only
+        end
+
+        Pxx(i+1) = Phat(1,1,i+1);
+        Pyy(i+1) = Phat(2,2,i+1);
+        Pzz(i+1) = Phat(3,3,i+1);
+
+        % carry updated covariance forward
+        Parr(:,:,i+1) = Phat(:,:,i+1);
+    end
+    % initialize first entries for plotting consistency
+    meas_hist(:,1) = [NaN; NaN; NaN];
+    Pxx(1) = cov0(1,1);
+    Pyy(1) = cov0(2,2);
+    Pzz(1) = cov0(3,3);
+
+    estimate = [xHat; meas_hist; Pxx; Pyy; Pzz];
+end
+
+%EKF Modified by Batch Least Squares Estimator
+function estimate = EKF_BLS(t, Parr, xHat, y, H, Q, R, sig, cov0, muBennu, opts)
+    for i = 1:length(t)-1
+        % Current updated covariance/state
+        P = Parr(:,:,i);
+        xPlus = xHat(:,i);
+
+        % --- Prediction step ---
+        % Propagate estimated state over one time step, together with STM
+        % This way our predictions are based off previous estimates
+        xAug0 = [xPlus; reshape(eye(6),[36 1])];
+        [~, yProp] = ode45(@(tt,xx) bennuProp(tt,xx,muBennu), [t(i) t(i+1)], xAug0, opts);
+
+        xBar = yProp(end,1:6)';                     % predicted state
+        phi  = reshape(yProp(end,7:42),[6 6]);     % predicted STM from estimated state
+        PBar = phi*P*phi' + Q;                      % predicted error covariance
+
+        % --- Measurement update ---
+        if mod(i,6) == 0   % update every 600 s since dt = 100 s
+            meas_num = 100;
+
+            meas_batch = zeros(3, meas_num);
+            for j = 1:meas_num
+                meas_batch(:,j) = y(i+1,1:3)' + sig*randn(3,1);
+            end
+
+            [x_bls_meas, R_bls] = BLS(meas_batch, R);
+            meas_hist(:,i+1) = x_bls_meas;
+
+            b = x_bls_meas - H*xBar;
+            K = PBar * H' / (H*PBar*H' + R_bls);
+
+            xHat(:,i+1) = xBar + K*b;
+            Phat(:,:,i+1) = PBar - K*H*PBar;
+        else
+            meas_hist(:,i+1) = [NaN; NaN; NaN];
+
+            xHat(:,i+1) = xBar;
+            Phat(:,:,i+1) = PBar;
+        end
+
+        Pxx(i+1) = Phat(1,1,i+1);
+        Pyy(i+1) = Phat(2,2,i+1);
+        Pzz(i+1) = Phat(3,3,i+1);
+
+        % carry updated covariance forward
+        Parr(:,:,i+1) = Phat(:,:,i+1);
+    end
+    % initialize first entries for plotting consistency
+    meas_hist(:,1) = [NaN; NaN; NaN];
+    Pxx(1) = cov0(1,1);
+    Pyy(1) = cov0(2,2);
+    Pzz(1) = cov0(3,3);
+
+    estimate = [xHat; meas_hist; Pxx; Pyy; Pzz];
+end
+
+%Batch Least Squares Estimator
+function [estimate, R_bls] = BLS(meas_batch, R)
+    m = size(meas_batch,2);
+
+    Y = reshape(meas_batch, [3*m,1]);
+    Hbig = kron(ones(m,1), eye(3));
+    Rbig = kron(eye(m), R);
+
+    estimate = (Hbig' / Rbig * Hbig) \ (Hbig' / Rbig * Y);
+    R_bls = inv(Hbig' / Rbig * Hbig);
 end
 
 function motion = BVP_ode(t, x, rho, uMax, imp, g, A, G0, muSun, thirdBodyStruct)
