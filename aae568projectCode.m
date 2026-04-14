@@ -43,7 +43,7 @@ muSun = muSun / (lStar^3/tStar^2); % nondim mu Sun
 
 % Time span
 t0 = 0; 
-tf = 8; % Minimum Fuel Time
+tf = 4; % Minimum Fuel Time
 timesp = linspace(t0, tf, 10000); % nondim time
 tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
 
@@ -55,28 +55,40 @@ bennuStateFinal = xBennuFinal(end,:);
 [rEarth0,vEarth0] = keplerian2eci(earthState0.a,earthState0.e,earthState0.i,earthState0.raan,earthState0.w,earthState0.f,muSun);
 [tEarth, xEarth] = ode45(@(t,x) cartesian(t,x,muSun), timesp, [rEarth0;vEarth0], opts); % Obtain Earth Traj
 
-state0 = [rEarth0; vEarth0; 1]; 
-lam0 = [-0.895497718328076	-0.0177401528695960	-0.00291874323928983 -0.0149050057898263	-0.588963432680147	-0.0515482332381265 0.602723390538055]';
+% state0 = [rEarth0; vEarth0; 1]; state0 = [rEarth0;vEarth0];
+lam0 = [-0.895497718328076	-0.0177401528695960	-0.00291874323928983 -0.0149050057898263	-0.588963432680147	-0.0515482332381265];% 0.602723390538055]';
 % lam0 = [-0.895497718328076	-0.0177401528695960	-0.00291874323928983 -0.0149050057898263	-0.588963432680147	-0.0515482332381265 0]';
 % lam0 = [-0.731770753080812	0.677925696745518	0.384908802939376	-0.819437957668691	-0.357979361186768	-0.248865754134473 0.6]';
 % lam0 = [-0.209713338388737;0.625190357087626;0.183227263001437;-1.02976754356662;0.949221831131023;0.307061919146703];
 % lam0 = [-0.062791225718325;-2.021958930051790;-0.982131525779048;0.612511298166949;-0.054886129988677;-1.118732002452725];
 % lam0 = [2.66422584754840	1.25384449753059	0.0958645336677085	1.46012691765693	2.74303169765418	0.641202376703710]';
-lam0 = [-7.056189800574376;-3.201638008572864;-0.410590282397993;1.401979996642279;-8.896050801869640;-1.946822076212186;0.297908965443030];
+lam0 = [-7.056189800574376;-3.201638008572864;-0.410590282397993;1.401979996642279;-8.896050801869640;-1.946822076212186;];%0.297908965443030];
+% lam0 = [-0.0263225942546584	-0.0842622945233970	0.432783583243446	1.16068625625127	0.445756415853732	1.23263815492386]';
+lam0 = [0.00157983952196894	3.41685417951864	-1.04968489035611	0.721855591999490	1.46096626320181	0.297079417291880]'; % 323 residual
 x0 = [0.952889305631249;0.314915275869680;-3.423788869337257e-05;-0.314640389450658;0.961074915362955;6.649991141937790e-04;2.885024662830222];
-x0 = [0.952889305631249;0.314915275869680;-3.423788869337257e-05;-0.314640389450658;0.961074915362955;6.649991141937790e-04;20];
-% lam0 = randn(7,1);
+x0 = [0.952889305631249;0.314915275869680;-3.423788869337257e-05;-0.314640389450658;0.961074915362955;6.649991141937790e-04];
+% lam0 = randn(6,1);
 options = bvpset('Stats','on','RelTol',1e-1);
 solinit = bvpinit(timesp,[x0; lam0]);
 sol = bvp4c(@BVP_ode, @BVP_BC, solinit, options);
 
+% for i = 1:50
+%     lam0 = randn(6,1) + ones(6,1);
+%     lamArr(i,:) = lam0';
+%     solinit = bvpinit(timesp,[x0; lam0]);
+%     sol = bvp4c(@BVP_ode, @BVP_BC, solinit, options);
+%     err(i) = sol.stats.maxres;
+% end
+
 t = sol.x; y = sol.y; 
+diff = y(1:6,end) - bennuStateFinal'
+
 plot3(y(1,:),y(2,:),y(3,:)); hold on
 plot3(rEarth0(1),rEarth0(2),rEarth0(3),'o','MarkerSize',7)
 plot3(bennuStateFinal(1),bennuStateFinal(2),bennuStateFinal(3),'rx','MarkerSize',7)
 plot3(xBennuFinal(:,1),xBennuFinal(:,2),xBennuFinal(:,3)); 
 plot3(xEarth(:,1),xEarth(:,2),xEarth(:,3))
-plot3(0,0,0,'go','MarkerSize',15)
+plot3(0,0,0,'go','MarkerSize',15); axis equal
 legend('Trajectory','Initial Position','Final Bennu Position','Bennu Orbit','Earth Orbit')
 
 % %% Part 2 - Orbit Determination for Bennu orbiting
@@ -222,56 +234,82 @@ function motion = BVP_ode(t, x)
 
     g0 = 1.654184883569765e+03; % nondim
     isp = 7.962226975300293e-04; % nondim
-    uMax = 0.1;
+    uMax = .1;
     rho = 1;
     muSun = 1;
     B = [zeros(3,3); eye(3)];
+    muSun = 1.32712440018e11;
+    kmInAU = 1.496192602435979E+08; % km/AU
+    
+    % Starred values
+    lStar = kmInAU; % lStar = 1.496e+8; % km In AU
+    tStar = sqrt(lStar^3/muSun); % s
+    muEarth = 3.986e5 / (lStar^3/tStar^2);
+
+    % % Maass
+    % % Set state and costate
+    % state = x(1:7);
+    % lambda = x(8:end);
+    % 
+    % % Set state and costate vectors
+    % r = state(1:3); v = state(4:6); m = state(7);
+    % lr = lambda(1:3); lv = lambda(4:6); lm = lambda(7);
+    % 
+    % if m < 0
+    %     return;
+    % end
+    % 
+    % % Control input setup
+    % uHatStar = -lv / norm(lv,2);
+    % S = 1 + lv' * uHatStar / m - lm / (isp*g0);
+    % gammaStar = 0.5 * uMax * (1 + tanh(-S / rho));
+    % u = gammaStar * uHatStar;
+    % 
+    % % dadx
+    % dadr  = -muSun * (eye(3) / norm(r)^3 - 3 * (r * r') / norm(r)^5);
+    % dadm = -u / m^2;
+    % 
+    % % Acceleration
+    % accel = -r/(norm(r)^3) + u/m;
+    % % accel = - muSun * r/(norm(r)^3);
+    % 
+    % % Derivative Values for integration
+    % xDot = [v; accel; -norm(u,2) / (isp*g0)];
+    % dfdx = [zeros(3,3), eye(3), zeros(3,1);
+    %         dadr, zeros(3,3), dadm;
+    %         zeros(1,3), zeros(1,3), 0];
+    % lamDot = (-lambda'*dfdx)';
+
+    % No Mass Included
 
     % Set state and costate
-    state = x(1:7);
-    lambda = x(8:end);
+    state = x(1:6);
+    lambda = x(7:end);
 
     % Set state and costate vectors
-    r = state(1:3); v = state(4:6); m = state(7);
-    lr = lambda(1:3); lv = lambda(4:6); lm = lambda(7);
+    r = state(1:3); v = state(4:6); 
+    lr = lambda(1:3); lv = lambda(4:6);
 
-    if m < 0
-        return;
+    p = -lambda'*B;
+    uHat = p/norm(p); %lambda' * B / (norm(lambda' * B));
+    if norm(p) > 1 %1 + lambda' * B > 0
+        gammaStar = uMax;
+    else
+        gammaStar = 0;
     end
+    u = gammaStar * uHat';
 
-    % Control input setup
-    uHatStar = -lv / norm(lv,2);
-    S = 1 + lv' * uHatStar / m - lm / (isp*g0);
-    gammaStar = 0.5 * uMax * (1 + tanh(-S / rho));
-    u = gammaStar * uHatStar;
-    % p = -lambda'*B;
-    % uHat = p/norm(p); %lambda' * B / (norm(lambda' * B));
-    % if norm(p) > 1 %1 + lambda' * B > 0
-        % gammaStar = uMax;
-    % else
-        % gammaStar = 0;
-    % end
-    % u = gammaStar * uHat';
+    % [aEarth3rd, deltaEar] = thirdBodyAccel(t,r);
 
-    % dadx
     dadr  = -muSun * (eye(3) / norm(r)^3 - 3 * (r * r') / norm(r)^5);
-    dadm = -u / m^2;
+    % dadrEarth = -muEarth * (eye(3) / norm(deltaEar)^3 - 3 * (deltaEar * deltaEar') / norm(deltaEar)^5); % Earth gravity
 
-    % Acceleration
-    accel = -r/(norm(r)^3) + u/m;
-    % accel = - muSun * r/(norm(r)^3);
 
-    % Derivative Values for integration
-    xDot = [v; accel; -norm(u,2) / (isp*g0)];
-    dfdx = [zeros(3,3), eye(3), zeros(3,1);
-            dadr, zeros(3,3), dadm;
-            zeros(1,3), zeros(1,3), 0];
+    accel = - muSun * r/(norm(r)^3);
+    xDot = [v; accel] + B*u;
+    dfdx = [zeros(3,3), eye(3);
+            dadr, zeros(3,3)];
     lamDot = (-lambda'*dfdx)';
-
-    % xDot = [v; accel] + B*u;
-    % dfdx = [zeros(3,3), eye(3);
-    %         dadr, zeros(3,3)];
-    % lamDot = (-lambda'*dfdx)';
 
     motion = [xDot; lamDot];
 end
@@ -307,14 +345,45 @@ function psi = BVP_BC(ya,yb)
     % [tBennu, xBennuFinal] = ode45(@(t,x) cartesian(t,x,muSun), timesp, [rBennu0;vBennu0], opts); % Obtain final Bennu state
     % bennuStateFinal = xBennuFinal(end,:);
 
-    bennuStateFinal = [-0.181593348009035,-1.325524561260322,-0.139342261550288,0.771544830707375,-0.057023998766918,-0.008827824253358];
-    rEarth0 = [0.660008526946153;-0.770520157507343;4.498704306828038e-05];
-    vEarth0 = [0.743091673107572;0.647112554348523;-2.966340636704018e-05];
+    bennuStateFinal = [0.983294926180036,0.092162926675563,0.006199427516039,-0.272285807454928,1.025042789524763,0.109235226115714]; % tf=8
+    bennuStateFinal = [-1.116995468875909,-0.626635227513236,-0.062165469673756,0.290438326985389,-0.761878778891941,-0.081507246228987]; % tf=4
+    rEarth0 = [0.952889305631249;0.314915275869680;-3.423788869337257e-05]; % both from x0, not rEarth0 and vEarth0
+    vEarth0 = [-0.314640389450658;0.961074915362955;6.649991141937790e-04];
+
+    % psi = [ya(1:3) - rEarth0;
+    %        ya(4:6) - vEarth0;
+    %        ya(7) - 20;
+    %        yb(1:6) - bennuStateFinal';
+    %        yb(14)];
 
     psi = [ya(1:3) - rEarth0;
            ya(4:6) - vEarth0;
-           ya(7) - 20;
-           yb(1:6) - bennuStateFinal';
-           yb(14)];
+           yb(1:6) - bennuStateFinal'];
 
+end
+
+function [accel, deltaEar] = thirdBodyAccel(t,x)
+
+    r = x(1:3);    
+    muSun = 1.32712440018e11;
+    kmInAU = 1.496192602435979E+08; % km/AU
+    
+    % Starred values
+    lStar = kmInAU; % lStar = 1.496e+8; % km In AU
+    tStar = sqrt(lStar^3/muSun); % s
+
+    earthState0 = struct;
+    earthState0.a = 1.496657326987069E+08 / lStar; % au
+    earthState0.e = 1.704313732350883E-02; earthState0.i = deg2rad(6.198205899446798E-03); earthState0.raan = deg2rad(1.799051298362160E+02);
+    earthState0.w = deg2rad(2.816178320319530E+02); earthState0.f = deg2rad(2.669012326892521E+02);
+    earthState0.n = deg2rad(1.139975551873910E-05) * tStar; earthState0.mu = 3.986e5 / (lStar^3/tStar^2);
+    earthState0.M = deg2rad(2.688526308587601E+02);
+
+    Mearth = earthState0.M + earthState0.n * t;
+    E = M2E(Mearth, earthState0.e); fEarth = E2f(E, earthState0.e);
+    [posEarth] = keplerian2eci(earthState0.a, earthState0.e, earthState0.i, ...
+        earthState0.raan, earthState0.w, fEarth,1);
+    deltaEar = r - posEarth;
+    accel = -earthState0.mu * ((deltaEar) / norm(deltaEar, 2)^3 + posEarth / norm(posEarth,2)^3);
+    
 end
