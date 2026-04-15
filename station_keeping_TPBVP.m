@@ -165,7 +165,7 @@ y_ref(1:6,end) - x0
 [t,y1] = ode45(@(t,x) bennuProp_old(t,x,muBennu), t, [r0;v0; reshape(eye(6),[36 1])], opts);
 y1(end,1:6)' - x0
 
-[t,y2] = ode45(@(t,x) bennuProp(t,x,muBennu), t, [r0;v0; reshape(eye(6),[36 1])], opts);
+[t,y2] = ode45(@(t,x) bennuProp(t,x,muBennu,true), t, [r0;v0; reshape(eye(6),[36 1])], opts);
 
 % guess prop
 y_g = guess_ytraj(t, x0, tf);
