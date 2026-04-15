@@ -26,8 +26,8 @@ Bk_hist = pagemtimes(phi_hist, Bk_int);
 
 % compute Ks (backwards in time)
 % k_out = ode45(@(t,x) k_ode(t,x, A, B, P, Q, R), fliplr(tspan), K0, options);
-Q = eye(nx);
-R = eye(nu);
+Q = diag([1,1,1,.5,.5,.5]);
+R = diag([1,1,1]);
 
 % K_hist = zeros(nu, nx, nt);
 % Pk = Q; % final Pk
