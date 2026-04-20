@@ -121,11 +121,14 @@ uMaxTransfer = 0.6;
 
 Initial_Guess = load('568ProjEarthToBennuGuess_1MASS.mat');
 sol = Initial_Guess.sol_mass;
-rhoTransfer = 0.1;
+rhoTransfer = [20 10 5 2 1 0.1];
 
-sol = bvp4c(@(t,x) BVP_ode_mass(t,x,rhoTransfer,uMaxTransfer), ...
+for k = 1:length(rhoTransfer)
+    rho = rhoTransfer(k);
+    sol = bvp4c(@(t,x) BVP_ode_mass(t,x,rho,uMaxTransfer), ...
                  @(ya,yb) BVP_BC_mass(ya,yb,rEarth0,vEarth0,bennuStateFinal,m0Transfer), ...
                  sol, bvpOptions);
+end
 
 % Plot result
 figure;
@@ -171,7 +174,7 @@ for i = 1:size(sol.y, 2)
     % Control
     uHatStar  = -lv / lvNorm;
     S         = 1 + lv' * uHatStar / mEff - lm / (isp*g0);
-    gammaStar = 0.5 * uMaxTransfer * (1 + tanh(-S / rhoTransfer));
+    gammaStar = 0.5 * uMaxTransfer * (1 + tanh(-S / rho));
     uTransfer(i) = norm(gammaStar * uHatStar);
 end
 
