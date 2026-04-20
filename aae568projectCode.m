@@ -1,389 +1,669 @@
+clc; clear; close all;
 % AAE 568 Project Script
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% Part 1 - Obtain trajectory to Bennu - work in progress
+%% SETUP CONSTANTS---------------------------------------------------------
 
-% g0 1.654184883569765e+03
-% isp 7.962226975300293e-04
-% bennu final state [0.983294926180036,0.092162926675563,0.006199427516039,-0.272285807454928,1.025042789524763,0.109235226115714]
-% from fsolve 1.0199   -0.2381   -0.0288    0.0380    1.0039    0.1059
-clc; clear; 
+% Solver options (shared between parts)
+tol = 1e-12;
+opts = odeset('RelTol', tol, 'AbsTol', tol);
 
-muSun = 1.32712440018e11;
-kmInAU = 1.496192602435979E+08; % km/AU
+% Shared Bennu / spacecraft constants
+muBennu = 5.2;                 % m^3/s^2
+radBennu = 250;                % m
+j2Bennu = 3.9257534110e-2;
+j3Bennu = 1.4711698072e-2;
+j4Bennu = 3.0760445246e-2;
 
-% Starred values
-lStar = kmInAU; % lStar = 1.496e+8; % km In AU
-tStar = sqrt(lStar^3/muSun); % s
+% Bennu inertia / mass properties
+ixxBennu = 1.8130e9;
+iyyBennu = 1.8836e9;
+izzBennu = 2.0334e9;           % kg km^2
+massBennu = 7.7e10;
 
-% earthState0 = struct;
-% earthState0.a = 1; % au
-% earthState0.e = 0.0169; earthState0.i = 4.001e-5; earthState0.raan = 2.4473;
-% earthState0.w = 5.6647; earthState0.f = 1.8858;
-% 
-% bennuState0 = struct;
-% bennuState0.a = 1.078; % au
-% bennuState0.e = 0.8270; bennuState0.i = 0.398; bennuState0.raan = 1.5356;
-% bennuState0.w = 0.5489; bennuState0.f = 3.8412;
+% Shared local-orbit initial condition around Bennu
+bennuOrbit0 = struct;
+bennuOrbit0.a = 1.5e3;
+bennuOrbit0.e = 0.05;
+bennuOrbit0.i = deg2rad(45);
+bennuOrbit0.raan = 0;
+bennuOrbit0.w = 0;
+bennuOrbit0.f = 0;
+
+[r0, v0] = keplerian2eci( ...
+    bennuOrbit0.a, bennuOrbit0.e, bennuOrbit0.i, ...
+    bennuOrbit0.raan, bennuOrbit0.w, bennuOrbit0.f, muBennu);
+
+x0Bennu = [r0; v0];
+bennuPeriod = 2*pi*sqrt(bennuOrbit0.a^3/muBennu);   % s
+
+% Shared process-noise setting for truth propagation
+sig_a_truth = 1e-7;           % m/s^2
+
+%--------------------------------------------------------------------------
+% Part 1: Earth to Bennu transfer
+%--------------------------------------------------------------------------
+muSun_km = 1.32712440018e11;   % km^3/s^2
+kmPerAU = 1.496192602435979E+08;             % km/AU
+
+% Canonical heliocentric units
+lStar = kmPerAU;                              % km
+tStar = sqrt(lStar^3 / muSun_km);
+
+% Nondimensional heliocentric constants
+muSun = muSun_km / (lStar^3 / tStar^2);
+g0 = (9.80665 / 1000) / (lStar / tStar^2);    % nondim
+isp = 4000 / tStar;                           % nondim
 
 earthState0 = struct;
-earthState0.a = 1.496657326987069E+08 / lStar; % au
-earthState0.e = 1.704313732350883E-02; earthState0.i = deg2rad(6.198205899446798E-03); earthState0.raan = deg2rad(1.799051298362160E+02);
-earthState0.w = deg2rad(2.816178320319530E+02); earthState0.f = deg2rad(2.669012326892521E+02);
+earthState0.a    = 1.496657326987069E+08 / lStar;
+earthState0.e    = 1.704313732350883E-02;
+earthState0.i    = deg2rad(6.198205899446798E-03);
+earthState0.raan = deg2rad(1.799051298362160E+02);
+earthState0.w    = deg2rad(2.816178320319530E+02);
+earthState0.f    = deg2rad(2.669012326892521E+02);
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+bennuHelioState0 = struct;
+bennuHelioState0.a    = 1.684375473676060E+08 / lStar;
+bennuHelioState0.e    = 2.037604127989827E-01;
+bennuHelioState0.i    = deg2rad(6.032225719717332E+00);
+bennuHelioState0.raan = deg2rad(1.949096214163919E+00);
+bennuHelioState0.w    = deg2rad(6.640855196853940E+01);
+bennuHelioState0.f    = deg2rad(2.693898971751065E+02);
 
-bennuState0 = struct;
-bennuState0.a = 1.684375473676060E+08 / lStar; % au
-bennuState0.e = 2.037604127989827E-01; bennuState0.i = deg2rad(6.032225719717332E+00); bennuState0.raan = deg2rad(1.949096214163919E+00);
-bennuState0.w = deg2rad(6.640855196853940E+01); bennuState0.f = deg2rad(2.693898971751065E+02);
+% Transfer time span (nondimensional heliocentric time)
+t0Transfer = 0;
+tfTransfer = 8;
+tspanTransfer = linspace(t0Transfer, tfTransfer, 80);
 
-g0 = (9.80665 / 1000) / (lStar / tStar^2); % m/s^2 => nondim
-isp = 4000 / (tStar); % s => nondim | 4000 s works
-muSun = muSun / (lStar^3/tStar^2); % nondim mu Sun
+%--------------------------------------------------------------------------
+% Part 2: Estimation around Bennu
+%--------------------------------------------------------------------------
+cov0 = diag([10, 10, 10, 0.1, 0.1, 0.1]);
 
-% Time span
-t0 = 0; 
-tf = 4; % Minimum Fuel Time
-timesp = linspace(t0, tf, 10000); % nondim time
-tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
+dtEst = 100;                                  % s
+tEst = 0:dtEst:(21.55*86400);                 % s
+bennuPeriod_days = bennuPeriod / 86400;
 
-[rBennu0,vBennu0] = keplerian2eci(bennuState0.a,bennuState0.e,bennuState0.i,bennuState0.raan,bennuState0.w,bennuState0.f,muSun);
-% ^ is different from fsolve bc i used a different f value for some reason
-[tBennu, xBennuFinal] = ode45(@(t,x) cartesian(t,x,muSun), timesp, [rBennu0;vBennu0], opts); % Obtain final Bennu state
-bennuStateFinal = xBennuFinal(end,:);
+%--------------------------------------------------------------------------
+% Part 3: LQR station keeping around Bennu
+%--------------------------------------------------------------------------
+tfStation = 10 * bennuPeriod;                 % s
+ntStation = 5000;
+tStation = linspace(0, tfStation, ntStation);
+dtStation = tfStation / ntStation;
 
-[rEarth0,vEarth0] = keplerian2eci(earthState0.a,earthState0.e,earthState0.i,earthState0.raan,earthState0.w,earthState0.f,muSun);
-[tEarth, xEarth] = ode45(@(t,x) cartesian(t,x,muSun), timesp, [rEarth0;vEarth0], opts); % Obtain Earth Traj
+nx = 6;
+nu = 3;
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Part 1 - Obtain trajectory to Bennu
 
-% state0 = [rEarth0; vEarth0; 1]; state0 = [rEarth0;vEarth0];
-lam0 = [-0.895497718328076	-0.0177401528695960	-0.00291874323928983 -0.0149050057898263	-0.588963432680147	-0.0515482332381265];% 0.602723390538055]';
-% lam0 = [-0.895497718328076	-0.0177401528695960	-0.00291874323928983 -0.0149050057898263	-0.588963432680147	-0.0515482332381265 0]';
-% lam0 = [-0.731770753080812	0.677925696745518	0.384908802939376	-0.819437957668691	-0.357979361186768	-0.248865754134473 0.6]';
-% lam0 = [-0.209713338388737;0.625190357087626;0.183227263001437;-1.02976754356662;0.949221831131023;0.307061919146703];
-% lam0 = [-0.062791225718325;-2.021958930051790;-0.982131525779048;0.612511298166949;-0.054886129988677;-1.118732002452725];
-% lam0 = [2.66422584754840	1.25384449753059	0.0958645336677085	1.46012691765693	2.74303169765418	0.641202376703710]';
-lam0 = [-7.056189800574376;-3.201638008572864;-0.410590282397993;1.401979996642279;-8.896050801869640;-1.946822076212186;];%0.297908965443030];
-% lam0 = [-0.0263225942546584	-0.0842622945233970	0.432783583243446	1.16068625625127	0.445756415853732	1.23263815492386]';
-lam0 = [0.00157983952196894	3.41685417951864	-1.04968489035611	0.721855591999490	1.46096626320181	0.297079417291880]'; % 323 residual
-x0 = [0.952889305631249;0.314915275869680;-3.423788869337257e-05;-0.314640389450658;0.961074915362955;6.649991141937790e-04;2.885024662830222];
-x0 = [0.952889305631249;0.314915275869680;-3.423788869337257e-05;-0.314640389450658;0.961074915362955;6.649991141937790e-04];
-% lam0 = randn(6,1);
-options = bvpset('Stats','on','RelTol',1e-1);
-solinit = bvpinit(timesp,[x0; lam0]);
-sol = bvp4c(@BVP_ode, @BVP_BC, solinit, options);
+[rBennu0,vBennu0] = keplerian2eci( ...
+    bennuHelioState0.a, bennuHelioState0.e, bennuHelioState0.i, ...
+    bennuHelioState0.raan, bennuHelioState0.w, bennuHelioState0.f, muSun);
 
-% for i = 1:50
-%     lam0 = randn(6,1) + ones(6,1);
-%     lamArr(i,:) = lam0';
-%     solinit = bvpinit(timesp,[x0; lam0]);
-%     sol = bvp4c(@BVP_ode, @BVP_BC, solinit, options);
-%     err(i) = sol.stats.maxres;
-% end
+[tBennu, xBennuTraj] = ode45(@(t,x) cartesian(t,x,muSun), ...
+    tspanTransfer, [rBennu0;vBennu0], opts);
 
-t = sol.x; y = sol.y; 
-diff = y(1:6,end) - bennuStateFinal'
+bennuStateFinal = xBennuTraj(end,:);
 
-plot3(y(1,:),y(2,:),y(3,:)); hold on
+[rEarth0,vEarth0] = keplerian2eci( ...
+    earthState0.a, earthState0.e, earthState0.i, ...
+    earthState0.raan, earthState0.w, earthState0.f, muSun);
+
+[tEarth, xEarthTraj] = ode45(@(t,x) cartesian(t,x,muSun), ...
+    tspanTransfer, [rEarth0;vEarth0], opts);
+
+bvpOptions = bvpset('Stats','on','RelTol',1e-1);
+
+m0Transfer = 20;
+uMaxTransfer = 0.6;
+
+Initial_Guess = load('568ProjEarthToBennuGuess_1MASS.mat');
+sol = Initial_Guess.sol_mass;
+rhoTransfer = 0.1;
+
+sol = bvp4c(@(t,x) BVP_ode_mass(t,x,rhoTransfer,uMaxTransfer), ...
+                 @(ya,yb) BVP_BC_mass(ya,yb,rEarth0,vEarth0,bennuStateFinal,m0Transfer), ...
+                 sol, bvpOptions);
+
+% Plot result
+figure;
+plot3(sol.y(1,:), sol.y(2,:), sol.y(3,:), 'LineWidth', 1.5); hold on
 plot3(rEarth0(1),rEarth0(2),rEarth0(3),'o','MarkerSize',7)
 plot3(bennuStateFinal(1),bennuStateFinal(2),bennuStateFinal(3),'rx','MarkerSize',7)
-plot3(xBennuFinal(:,1),xBennuFinal(:,2),xBennuFinal(:,3)); 
-plot3(xEarth(:,1),xEarth(:,2),xEarth(:,3))
-plot3(0,0,0,'go','MarkerSize',15); axis equal
-legend('Trajectory','Initial Position','Final Bennu Position','Bennu Orbit','Earth Orbit')
+plot3(xBennuTraj(:,1),xBennuTraj(:,2),xBennuTraj(:,3))
+plot3(xEarthTraj(:,1),xEarthTraj(:,2),xEarthTraj(:,3))
+plot3(0,0,0,'go','MarkerSize',15)
+axis equal
+grid on
+legend('Mass-inclusive transfer','Initial Position','Final Bennu Position','Bennu Orbit','Earth Orbit','Sun')
+title('Earth-to-Bennu Transfer with Mass Dynamics')
 
-% %% Part 2 - Orbit Determination for Bennu orbiting
-% 
-% % Constants
-% muBennu = 5.2; % m^3/s^2
-% tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
-% ixx = 1.8130e9; 
-% iyy = 1.8836e9;
-% izz = 2.0334e9; % kg km^2
-% mass = 7.7e10;
-% 
-% j2 = 3.9257534110e-2;
-% j3 = 1.4711698072e-2;
-% j4 = 3.0760445246e-2;
-% 
-% % Initial Orbit
-% orbit = struct;
-% orbit.a = 1.5e3; orbit.e = 0.05; orbit.i = deg2rad(45); 
-% orbit.raan = 0; orbit.w = 0; orbit.f = 0;
-% 
-% [r0,v0] = keplerian2eci(orbit.a,orbit.e,orbit.i,orbit.raan,orbit.w,orbit.f,muBennu);
-% cov0 = diag([10,10,10,0.1,0.1,0.1]);
-% 
-% % Time
-% time = linspace(0,50*86400,5000);
-% period = 2*pi*sqrt(orbit.a^3/muBennu) / 86400
-% 
-% % Truth Propagation
-% [t,y] = ode45(@(t,x) bennuProp(t,x,muBennu), time, [r0;v0; reshape(eye(6),[36 1])], opts);
-% 
-% % Noisy Propagation
-% [tN,yN] = ode45(@(t,x) bennuProp(t,x,muBennu), time, [r0+randn(3,1);v0; reshape(eye(6),[36 1])], opts);
-% 
-% % EKF
-% 
-% for i = 1:length(t)
-%     phi(:,:,i) = reshape(y(i,7:42),[6 6]);
-% end
-% 
-% H = [eye(3) zeros(3,3)];
-% Q = eye(6) / 10; Q(4:6,4:6) = Q(4:6,4:6) / 10;
-% R = 0.1*eye(3);
-% Parr = zeros(6,6,length(t)); Parr(:,:,1) = cov0;
-% for i = 1:length(t)
-%     P = Parr(:,:,i);
-%     phi = reshape(y(i,7:42),[6 6]);
-%     xBar = yN(i,1:6)';
-%     covBar = phi*P*phi' + Q;
-% 
-%     meas = y(i,1:3)' + (randn(3,1) / 10);
-%     % meas(1:3) = meas(1:3) + (randn(3,1) / 10);
-%     % meas(4:6) = meas(4:6) + (randn(3,1) / 1000);
-% 
-%     b = meas - H*xBar;
-%     K = covBar * H' * inv(H*covBar*H' + R);
-%     delX = K*b;
-%     Phat(:,:,i) = covBar - K*H*covBar;
-%     Pxx(i) = Phat(1,1,i);
-%     Pyy(i) = Phat(2,2,i);
-%     Pzz(i) = Phat(3,3,i);
-%     xHat(:,i) = xBar + delX;
-% 
-% end
-% 
-% % Plot True Dynamics
-% figure; plot3(y(:,1),y(:,2),y(:,3)); hold on;
-% fv = stlread('g_06290mm_spc_obj_0000n00000_v008.stl');
-% % Visualize correctly
-% pp = patch('Faces', fv.ConnectivityList, ...
-%           'Vertices', fv.Points, ...
-%           'FaceColor', [0.8 0.8 0.8], ...
-%           'EdgeColor', 'none', ...
-%           'FaceLighting', 'gouraud');
-% % Adjust view
-% axis equal
-% camlight headlight
-% xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)'); title('Asteroid Orbit Control'); 
-% 
-% % Plot EKF Results
-% figure; plot3(xHat(1,:),xHat(2,:),xHat(3,:)); hold on;
-% fv = stlread('g_06290mm_spc_obj_0000n00000_v008.stl');
-% % Visualize correctly
-% pp = patch('Faces', fv.ConnectivityList, ...
-%           'Vertices', fv.Points, ...
-%           'FaceColor', [0.8 0.8 0.8], ...
-%           'EdgeColor', 'none', ...
-%           'FaceLighting', 'gouraud');
-% % Adjust view
-% axis equal
-% camlight headlight
-% xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)'); title('Asteroid Orbit Control'); 
-% 
-% % Plot Differences between Truth and EKF
-% figure;
-% subplot(3,1,1); plot(t,y(:,1) - xHat(1,:)')
-% subplot(3,1,2); plot(t,y(:,2) - xHat(2,:)')
-% subplot(3,1,3); plot(t,y(:,3) - xHat(3,:)')
-% 
-% % Plot sigma bounds
-% figure;
-% subplot(3,1,1); plot(t,xHat(1,:)); hold on; plot(t, xHat(1,:) + 3 * sqrt(Pxx)); plot(t, xHat(1,:) - 3 * sqrt(Pxx))
-% subplot(3,1,2); plot(t,xHat(2,:)); hold on; plot(t, xHat(2,:) + 3 * sqrt(Pyy)); plot(t, xHat(2,:) - 3 * sqrt(Pyy))
-% subplot(3,1,3); plot(t,xHat(3,:)); hold on; plot(t, xHat(3,:) + 3 * sqrt(Pzz)); plot(t, xHat(3,:) - 3 * sqrt(Pzz))
+% Plot mass history just to check that its working
+t_mass = sol.x;
+y_mass = sol.y;
 
-%% Functions
+m_hist = y_mass(7,:); 
 
-function dx = bennuProp(t,x,muBody)
+% Plot mass consumed
+m0Transfer = m_hist(1);
+mass_used = m0Transfer - m_hist;
 
-    % Constants
-    r = norm(x(1:3)); v = norm(x(4:6)); phi = reshape(x(7:42), [6 6]);
-    radBennu = 250; % m
-    j2 = 3.9257534110e-2;
-    j3 = 1.4711698072e-2;
+% Print quick diagnostics
+fprintf('Initial mass: %.6f\n', m_hist(1));
+fprintf('Final mass:   %.6f\n', m_hist(end));
+fprintf('Mass used:    %.6f\n', m_hist(1) - m_hist(end));
+fprintf('Minimum mass over trajectory: %.6f\n', min(m_hist));
 
-    % J2 Acceleration and Partials
-    j2leadingTerm = (-3*muBody*j2*radBennu^2) / (2*r^5);
-    j2BCI = j2leadingTerm * [x(1)*(1-5*(x(3)^2/r^2)); x(2)*(1-5*(x(3)^2/r^2)); x(3)*(3-5*(x(3)^2/r^2))];
+%Calculate Optimal Input for this trajectory
+uTransfer = zeros(1, size(sol.y,2));
+for i = 1:size(sol.y, 2)
+    lr = sol.y(8:10,i);
+    lv = sol.y(11:13, i);
+    lm = sol.y(14,i);
 
-    dfdr = muBody * (3*x(1:3)*x(1:3)' / r^5 - eye(3)/r^3);
-    dj2dx = -3*muBody*j2*radBennu^2 / (2*r^5) * [5*x(1)*(7*x(3)^2/r^2 - 1)/r^2 * x(1:3)' + (1-5*x(3)^2/r^2) * [1,0,0] - 10*x(1)*x(3)/r^2 * [0,0,1]];
-    dj2dy = -3*muBody*j2*radBennu^2 / (2*r^5) * [5*x(2)*(7*x(3)^2/r^2 - 1)/r^2 * x(1:3)' + (1-5*x(3)^2/r^2) * [0,1,0] - 10*x(1)*x(3)/r^2 * [0,0,1]];
-    dj2dz = -3*muBody*j2*radBennu^2 / (2*r^5) * [5*x(1)*(7*x(3)^2/r^2 - 3)/r^2 * x(1:3)' + 3*(1-5*x(3)^2/r^2) * [0,0,1]];
-    dj2dr = [dj2dx;dj2dy;dj2dz];
+    % Numerical floors
+    lvNorm = max(norm(lv,2), 1e-8);
+    m = sol.y(7,i);
+    mEff   = max(m, 1e-6);
 
-    % J3 Acceleration and Partials
-    j3termXY = 5*muBody*radBennu^3*j3 / (2*r^7);
-    j3termZ = muBody*radBennu^3*j3 / (2*r^5);
-    j3BCI = [j3termXY * (7*x(3)^2 / r^2 - 3) * x(3)*x(1); j3termXY * (7*x(3)^2 / r^2 - 3) * x(3)*x(2); j3termZ * (3 - 30*x(3)^2/r^2 + 35*x(3)^4/r^4)];
-
-    a = -muBody * x(1:3) / r^3 + j2BCI;% + j3BCI;
-
-    A = zeros(6,6); A(1:3,4:6) = eye(3);
-    A(4:6,1:3) = dfdr + dj2dr;
-
-    phiDot = A * phi;
-    
-    dx = [x(4:6); a; reshape(phiDot, [36 1])];
-
+    % Control
+    uHatStar  = -lv / lvNorm;
+    S         = 1 + lv' * uHatStar / mEff - lm / (isp*g0);
+    gammaStar = 0.5 * uMaxTransfer * (1 + tanh(-S / rhoTransfer));
+    uTransfer(i) = norm(gammaStar * uHatStar);
 end
 
-function motion = BVP_ode(t, x)
+%Plot Input
+figure()
+plot(t_mass, uTransfer)
+title('Optimal Input History')
+xlabel('Time (nondim)')
+ylabel('Input')
+grid()
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Part 2 - Station Keeping with EKF+BLS State Feedback
 
-    g0 = 1.654184883569765e+03; % nondim
-    isp = 7.962226975300293e-04; % nondim
-    uMax = .1;
-    rho = 1;
-    muSun = 1;
-    B = [zeros(3,3); eye(3)];
-    muSun = 1.32712440018e11;
-    kmInAU = 1.496192602435979E+08; % km/AU
-    
-    % Starred values
-    lStar = kmInAU; % lStar = 1.496e+8; % km In AU
-    tStar = sqrt(lStar^3/muSun); % s
-    muEarth = 3.986e5 / (lStar^3/tStar^2);
+rng(1)
 
-    % % Maass
-    % % Set state and costate
-    % state = x(1:7);
-    % lambda = x(8:end);
-    % 
-    % % Set state and costate vectors
-    % r = state(1:3); v = state(4:6); m = state(7);
-    % lr = lambda(1:3); lv = lambda(4:6); lm = lambda(7);
-    % 
-    % if m < 0
-    %     return;
-    % end
-    % 
-    % % Control input setup
-    % uHatStar = -lv / norm(lv,2);
-    % S = 1 + lv' * uHatStar / m - lm / (isp*g0);
-    % gammaStar = 0.5 * uMax * (1 + tanh(-S / rho));
-    % u = gammaStar * uHatStar;
-    % 
-    % % dadx
-    % dadr  = -muSun * (eye(3) / norm(r)^3 - 3 * (r * r') / norm(r)^5);
-    % dadm = -u / m^2;
-    % 
-    % % Acceleration
-    % accel = -r/(norm(r)^3) + u/m;
-    % % accel = - muSun * r/(norm(r)^3);
-    % 
-    % % Derivative Values for integration
-    % xDot = [v; accel; -norm(u,2) / (isp*g0)];
-    % dfdx = [zeros(3,3), eye(3), zeros(3,1);
-    %         dadr, zeros(3,3), dadm;
-    %         zeros(1,3), zeros(1,3), 0];
-    % lamDot = (-lambda'*dfdx)';
+% Use shared setup values
+r0Station = x0Bennu(1:3);
+v0Station = x0Bennu(4:6);
 
-    % No Mass Included
+%% Reference trajectory
+[~, yRefAug] = ode45( ...
+    @(t,x) bennuProp(t, x, muBennu, true, [0;0;0], [0;0;0], 'central', true), ...
+    tStation, ...
+    [r0Station; v0Station; reshape(eye(6), [nx^2 1]); reshape(zeros(nx, nu), [nx*nu 1])], ...
+    opts);
 
-    % Set state and costate
-    state = x(1:6);
-    lambda = x(7:end);
+xRef = yRefAug(:,1:6);
 
-    % Set state and costate vectors
-    r = state(1:3); v = state(4:6); 
-    lr = lambda(1:3); lv = lambda(4:6);
+phiHist   = matrixify(yRefAug(:, (nx+1):(nx+nx^2)), 6, 6);
+BkIntHist = matrixify(yRefAug(:, (nx+nx^2+1):(nx+nx^2+nx*nu)), nx, nu);
+BkHist    = pagemtimes(phiHist, BkIntHist);
 
-    p = -lambda'*B;
-    uHat = p/norm(p); %lambda' * B / (norm(lambda' * B));
-    if norm(p) > 1 %1 + lambda' * B > 0
-        gammaStar = uMax;
+%% LQR gain computation
+Q_lqr  = diag([1, 1, 1, 0.5, 0.5, 0.5]);
+R_lqr  = diag([1, 1, 1]);
+Qf_lqr = 2 * Q_lqr;
+
+KHist = zeros(nu, nx, ntStation);
+Pk = Qf_lqr;
+
+for k = ntStation-1:-1:1
+    Ak = phiHist(:,:,k+1) / phiHist(:,:,k);
+    Bk = BkHist(:,:,k+1) - Ak * BkHist(:,:,k);
+
+    S = R_lqr + Bk' * Pk * Bk;
+    KHist(:,:,k) = S \ (Bk' * Pk * Ak);
+
+    Pk = Q_lqr + Ak' * Pk * Ak - Ak' * Pk * Bk * (S \ (Bk' * Pk * Ak));
+end
+
+%% EKF + BLS settings
+sigMeas = 2;                          % raw measurement std dev [m]
+measStride =2;                       % measurement every 2 steps, roughly 10 minutes
+measBatchCount = 100;                 % number of raw measurements per batch
+
+H_meas = [eye(3) zeros(3,3)];
+Q_ekf = diag([1e-6, 1e-6, 1e-6, 1e-10, 1e-10, 1e-10]);
+R_raw = sigMeas^2 * eye(3);
+
+%% Truth + estimate + control histories
+uRef = zeros(nu, ntStation);
+
+xTruth = zeros(nx, ntStation);
+xEst   = zeros(nx, ntStation);
+uHist  = zeros(nu, ntStation-1);
+
+rawMeasHist = NaN(3, ntStation);
+blsMeasHist = NaN(3, ntStation);
+
+PHist = zeros(nx, nx, ntStation);
+PHist(:,:,1) = cov0;
+
+% Initial conditions
+xTruth(:,1) = [r0Station + [10;10;10]; v0Station];
+xEst(:,1)   = [r0Station + sigMeas*randn(3,1); v0Station + sigMeas*randn(3,1)];
+
+%% Closed-loop simulation with EKF+BLS in the loop
+for k = 1:ntStation-1
+    % Controller uses estimated state
+    errEst_k = xEst(:,k) - xRef(k,:)';
+    u_k = uRef(:,k) - KHist(:,:,k) * errEst_k;
+    uHist(:,k) = u_k;
+
+    % Propagate truth with process noise and applied control
+    aNoise_k = sig_a_truth * randn(3,1);
+    [~, yTruthSeg] = ode45( ...
+        @(tt,xx) bennuProp(tt, xx, muBennu, false, aNoise_k, u_k, 'full', false), ...
+        [tStation(k) tStation(k+1)], ...
+        xTruth(:,k), ...
+        opts);
+
+    xTruth(:,k+1) = yTruthSeg(end,:)';
+
+    % EKF prediction: same control, no process noise
+    xAug0 = [xEst(:,k); reshape(eye(6), [36 1])];
+    [~, yPredSeg] = ode45( ...
+        @(tt,xx) bennuProp(tt, xx, muBennu, true, [0;0;0], u_k, 'full', false), ...
+        [tStation(k) tStation(k+1)], ...
+        xAug0, ...
+        opts);
+
+    xBar = yPredSeg(end,1:6)';
+    phiPred = reshape(yPredSeg(end,7:42), [6 6]);
+    PBar = phiPred * PHist(:,:,k) * phiPred' + Q_ekf;
+
+    % Measurement update
+    if mod(k, measStride) == 0
+        measBatch = zeros(3, measBatchCount);
+        for j = 1:measBatchCount
+            measBatch(:,j) = xTruth(1:3,k+1) + sigMeas*randn(3,1);
+        end
+
+        rawMeasHist(:,k+1) = measBatch(:,1);
+
+        [zBLS, R_bls] = BLS(measBatch, R_raw);
+        blsMeasHist(:,k+1) = zBLS;
+
+        innovation = zBLS - H_meas*xBar;
+        KGain = PBar * H_meas' / (H_meas*PBar*H_meas' + R_bls);
+
+        xEst(:,k+1) = xBar + KGain * innovation;
+        PHist(:,:,k+1) = PBar - KGain * H_meas * PBar;
     else
-        gammaStar = 0;
+        xEst(:,k+1) = xBar;
+        PHist(:,:,k+1) = PBar;
     end
-    u = gammaStar * uHat';
+end
 
-    % [aEarth3rd, deltaEar] = thirdBodyAccel(t,r);
+%% Open-loop truth for comparison
+[~, yOpen] = ode45( ...
+    @(t,x) bennuProp(t, x, muBennu, false, [0;0;0], [0;0;0], 'full', false), ...
+    tStation, ...
+    [r0Station + [10;10;10]; v0Station], ...
+    opts);
 
+%% Build outputs for plotting
+yCtrl = xTruth.';
+yEst  = xEst.';
+
+trackErrTruth = yCtrl(:,1:6) - yRefAug(:,1:6);
+trackErrEst   = yEst(:,1:6)  - yRefAug(:,1:6);
+
+estErr = yCtrl(:,1:6)' - xEst;
+estErrNorm = vecnorm(estErr(1:3,:), 2, 1);
+
+sig3Hist = 3 * [ ...
+    sqrt(squeeze(PHist(1,1,:)))'; ...
+    sqrt(squeeze(PHist(2,2,:)))'; ...
+    sqrt(squeeze(PHist(3,3,:)))' ];
+
+%% Derived quantities for plotting
+trackErrNorm = vecnorm(trackErrTruth', 2, 1);
+
+posTruthErrNorm = vecnorm(trackErrTruth(:,1:3)', 2, 1);
+posEstErrNorm   = vecnorm(estErr(1:3,:), 2, 1);
+
+rawMeasErr = yCtrl(:,1:3)' - rawMeasHist;
+blsMeasErr = yCtrl(:,1:3)' - blsMeasHist;
+
+validRaw = ~isnan(rawMeasErr(1,:));
+validBLS = ~isnan(blsMeasErr(1,:));
+
+rawMeasErrNorm = NaN(1, ntStation);
+blsMeasErrNorm = NaN(1, ntStation);
+rawMeasErrNorm(validRaw) = vecnorm(rawMeasErr(:,validRaw), 2, 1);
+blsMeasErrNorm(validBLS) = vecnorm(blsMeasErr(:,validBLS), 2, 1);
+
+%% 1) 3D trajectory comparison (full view)
+figure('Name','Trajectories: Full View');
+plot3(yRefAug(:,1), yRefAug(:,2), yRefAug(:,3), 'LineWidth', 1.5, ...
+    'DisplayName', 'Reference Orbit');
+hold on
+plot3(yOpen(:,1), yOpen(:,2), yOpen(:,3), 'LineWidth', 1.5, ...
+    'DisplayName', 'Open-Loop Perturbed');
+plot3(yCtrl(:,1), yCtrl(:,2), yCtrl(:,3), '--', 'LineWidth', 1.5, ...
+    'DisplayName', 'Closed-Loop Truth');
+plot3(yEst(:,1), yEst(:,2), yEst(:,3), ':', 'LineWidth', 1.5, ...
+    'DisplayName', 'Closed-Loop Estimate');
+
+fv = stlread('g_06290mm_spc_obj_0000n00000_v008.stl');
+patch('Faces', fv.ConnectivityList, ...
+      'Vertices', fv.Points, ...
+      'FaceColor', [0.8 0.8 0.8], ...
+      'EdgeColor', 'none', ...
+      'FaceLighting', 'gouraud', ...
+      'DisplayName', 'Bennu Shape');
+
+grid on
+axis equal
+camlight headlight
+xlabel('X Position (m)')
+ylabel('Y Position (m)')
+zlabel('Z Position (m)')
+title('Asteroid Orbit Control Trajectories')
+legend('Location', 'best')
+hold off
+
+%% 2) Tracking error components
+figure('Name','Tracking Error Components');
+
+subplot(2,1,1)
+plot(tStation, trackErrTruth(:,1:3), 'LineWidth', 1.2)
+grid on
+xlabel('Time (s)')
+ylabel('Position Error (m)')
+title('Truth Position Tracking Error')
+legend('e_x', 'e_y', 'e_z', 'Location', 'best')
+
+subplot(2,1,2)
+plot(tStation, trackErrTruth(:,4:6), 'LineWidth', 1.2)
+grid on
+xlabel('Time (s)')
+ylabel('Velocity Error (m/s)')
+title('Truth Velocity Tracking Error')
+legend('e_{v_x}', 'e_{v_y}', 'e_{v_z}', 'Location', 'best')
+
+%% 3) Norm summary plot
+figure('Name','Norm Summaries');
+plot(tStation, trackErrNorm, 'LineWidth', 1.4, 'DisplayName', 'Tracking Error Norm'); hold on
+plot(tStation, posEstErrNorm, 'LineWidth', 1.4, 'DisplayName', 'Estimation Error Norm');
+grid on
+xlabel('Time (s)')
+ylabel('Norm')
+title('Tracking and Estimation Error Norms')
+legend('Location', 'best')
+
+%% 4) Control history
+figure('Name','LQR Control History');
+plot(tStation(1:end-1), uHist', 'LineWidth', 1.2)
+grid on
+xlabel('Time (s)')
+ylabel('Control Acceleration (m/s^2)')
+title('LQR Control Correction History')
+legend('u_x', 'u_y', 'u_z', 'Location', 'best')
+
+%% 5) Estimation error vs 3-sigma
+figure('Name','Estimation Error vs 3-Sigma');
+
+labels = {'X Error (m)', 'Y Error (m)', 'Z Error (m)'};
+for idx = 1:3
+    subplot(3,1,idx)
+    plot(tStation, estErr(idx,:), 'LineWidth', 1.2); hold on
+    plot(tStation,  sig3Hist(idx,:), '--', 'LineWidth', 1.0)
+    plot(tStation, -sig3Hist(idx,:), '--', 'LineWidth', 1.0)
+    yline(0, 'k:')
+    grid on
+    xlabel('Time (s)')
+    ylabel(labels{idx})
+    title(['Estimation Error and 3\sigma Bounds: ', char('X'+idx-1)])
+    legend('Estimation Error', '+3\sigma', '-3\sigma', 'Zero Error', 'Location', 'best')
+end
+
+%% 6) Measurement quality: raw vs BLS norm
+figure('Name','Measurement Error Norm');
+plot(tStation, rawMeasErrNorm, '.', 'DisplayName', 'Raw Measurement Error Norm'); hold on
+plot(tStation, blsMeasErrNorm, '.', 'DisplayName', 'BLS Measurement Error Norm');
+grid on
+xlabel('Time (s)')
+ylabel('Position Error Norm (m)')
+title('Raw vs BLS Measurement Error Norm')
+legend('Location', 'best')
+
+%% RMS summary
+validRaw = ~isnan(rawMeasErr(1,:));
+validBLS = ~isnan(blsMeasErr(1,:));
+
+rawMeasErrNorm = vecnorm(rawMeasErr(:,validRaw), 2, 1);
+blsMeasErrNorm = vecnorm(blsMeasErr(:,validBLS), 2, 1);
+
+rmsRawMeas = sqrt(mean(rawMeasErrNorm.^2));
+rmsBLSMeas = sqrt(mean(blsMeasErrNorm.^2));
+rmsEst = sqrt(mean(estErrNorm(validBLS).^2));
+
+fprintf('\n------ Station-Keeping + EKF/BLS Summary ------\n');
+fprintf('Raw Measurement RMS Error:         %.4f m\n', rmsRawMeas);
+fprintf('BLS Measurement RMS Error:         %.4f m\n', rmsBLSMeas);
+fprintf('Closed-Loop Estimate RMS Error:    %.4f m\n', rmsEst);
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function motion = BVP_ode_mass(t, x, rho, uMax)
+
+    g0 = 1.654184883569765e+03;   % nondim
+    isp = 7.962226975300293e-04;  % nondim
+    muSun = 1;
+
+    % State and costate
+    state = x(1:7);
+    lambda = x(8:14);
+
+    r = state(1:3);
+    v = state(4:6);
+    m = state(7);
+
+    lr = lambda(1:3);
+    lv = lambda(4:6);
+    lm = lambda(7);
+
+    % Numerical floors
+    lvNorm = max(norm(lv,2), 1e-8);
+    mEff   = max(m, 1e-6);
+
+    % Control
+    uHatStar  = -lv / lvNorm;
+    S         = 1 + lv' * uHatStar / mEff - lm / (isp*g0);
+    gammaStar = 0.5 * uMax * (1 + tanh(-S / rho));
+    u         = gammaStar * uHatStar;
+
+    % Dynamics
     dadr  = -muSun * (eye(3) / norm(r)^3 - 3 * (r * r') / norm(r)^5);
-    % dadrEarth = -muEarth * (eye(3) / norm(deltaEar)^3 - 3 * (deltaEar * deltaEar') / norm(deltaEar)^5); % Earth gravity
+    dadm  = -u / mEff^2;
+    accel = -r/(norm(r)^3) + u/mEff;
 
+    xDot = [v;
+            accel;
+            -norm(u,2)/(isp*g0)];
 
-    accel = - muSun * r/(norm(r)^3);
-    xDot = [v; accel] + B*u;
-    dfdx = [zeros(3,3), eye(3);
-            dadr, zeros(3,3)];
-    lamDot = (-lambda'*dfdx)';
+    dfdx = [zeros(3,3), eye(3), zeros(3,1);
+            dadr,       zeros(3,3), dadm;
+            zeros(1,3), zeros(1,3), 0];
+
+    lamDot = (-lambda' * dfdx)';
 
     motion = [xDot; lamDot];
 end
 
-function psi = BVP_BC(ya,yb)
-
-    % muSun = 1;
-    % 
-    % earthState0 = struct;
-    % earthState0.a = 1; % au
-    % earthState0.e = 0.0169;
-    % earthState0.i = 4.001e-5;
-    % earthState0.raan = 2.4473;
-    % earthState0.w = 5.6647;
-    % earthState0.f = 1.8858;
-    % 
-    % bennuState0 = struct;
-    % bennuState0.a = 1.078; % au
-    % bennuState0.e = 0.8270;
-    % bennuState0.i = 0.398;
-    % bennuState0.raan = 1.5356;
-    % bennuState0.w = 0.5489;
-    % bennuState0.f = 3.8412;
-    % 
-    % [rEarth0,vEarth0] = keplerian2eci(earthState0.a,earthState0.e,earthState0.i,earthState0.raan,earthState0.w,earthState0.f,muSun);
-    % [rBennu0,vBennu0] = keplerian2eci(bennuState0.a,bennuState0.e,bennuState0.i,bennuState0.raan,bennuState0.w,bennuState0.f,muSun);
-    % 
-    % t0 = 0; 
-    % tf = 8; % Minimum Fuel Time
-    % timesp = linspace(t0, tf, 10000); % nondim time
-    % tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
-    % 
-    % [tBennu, xBennuFinal] = ode45(@(t,x) cartesian(t,x,muSun), timesp, [rBennu0;vBennu0], opts); % Obtain final Bennu state
-    % bennuStateFinal = xBennuFinal(end,:);
-
-    bennuStateFinal = [0.983294926180036,0.092162926675563,0.006199427516039,-0.272285807454928,1.025042789524763,0.109235226115714]; % tf=8
-    bennuStateFinal = [-1.116995468875909,-0.626635227513236,-0.062165469673756,0.290438326985389,-0.761878778891941,-0.081507246228987]; % tf=4
-    rEarth0 = [0.952889305631249;0.314915275869680;-3.423788869337257e-05]; % both from x0, not rEarth0 and vEarth0
-    vEarth0 = [-0.314640389450658;0.961074915362955;6.649991141937790e-04];
-
-    % psi = [ya(1:3) - rEarth0;
-    %        ya(4:6) - vEarth0;
-    %        ya(7) - 20;
-    %        yb(1:6) - bennuStateFinal';
-    %        yb(14)];
+function psi = BVP_BC_mass(ya, yb, rEarth0, vEarth0, bennuStateFinal, m0)
 
     psi = [ya(1:3) - rEarth0;
            ya(4:6) - vEarth0;
-           yb(1:6) - bennuStateFinal'];
-
+           ya(7)   - m0;
+           yb(1:6) - bennuStateFinal';
+           yb(14)];
 end
 
-function [accel, deltaEar] = thirdBodyAccel(t,x)
+function dx = bennuProp(t, x, muBody, propSTM, aNoise, u, modelType, propBk)
+    % Consolidated Bennu propagator
+    %
+    % Inputs
+    %   t         - time
+    %   x         - state vector
+    %   muBody    - Bennu gravitational parameter
+    %   propSTM   - true/false, propagate STM
+    %   aNoise    - 3x1 process-noise acceleration
+    %   u         - 3x1 control acceleration
+    %   modelType - 'central', 'j2', or 'full'
+    %   propBk    - true/false, propagate Bk integral states (requires STM)
+    %
+    % State layouts supported:
+    %   6-state:   [r; v]
+    %   42-state:  [r; v; vec(Phi)]
+    %   60-state:  [r; v; vec(Phi); vec(BkInt)]
 
-    r = x(1:3);    
-    muSun = 1.32712440018e11;
-    kmInAU = 1.496192602435979E+08; % km/AU
-    
-    % Starred values
-    lStar = kmInAU; % lStar = 1.496e+8; % km In AU
-    tStar = sqrt(lStar^3/muSun); % s
+    if nargin < 4 || isempty(propSTM)
+        propSTM = false;
+    end
+    if nargin < 5 || isempty(aNoise)
+        aNoise = [0;0;0];
+    end
+    if nargin < 6 || isempty(u)
+        u = [0;0;0];
+    end
+    if nargin < 7 || isempty(modelType)
+        modelType = 'full';
+    end
+    if nargin < 8 || isempty(propBk)
+        propBk = false;
+    end
 
-    earthState0 = struct;
-    earthState0.a = 1.496657326987069E+08 / lStar; % au
-    earthState0.e = 1.704313732350883E-02; earthState0.i = deg2rad(6.198205899446798E-03); earthState0.raan = deg2rad(1.799051298362160E+02);
-    earthState0.w = deg2rad(2.816178320319530E+02); earthState0.f = deg2rad(2.669012326892521E+02);
-    earthState0.n = deg2rad(1.139975551873910E-05) * tStar; earthState0.mu = 3.986e5 / (lStar^3/tStar^2);
-    earthState0.M = deg2rad(2.688526308587601E+02);
+    % Basic state
+    rVec = x(1:3);
+    vVec = x(4:6);
+    r = norm(rVec);
 
-    Mearth = earthState0.M + earthState0.n * t;
-    E = M2E(Mearth, earthState0.e); fEarth = E2f(E, earthState0.e);
-    [posEarth] = keplerian2eci(earthState0.a, earthState0.e, earthState0.i, ...
-        earthState0.raan, earthState0.w, fEarth,1);
-    deltaEar = r - posEarth;
-    accel = -earthState0.mu * ((deltaEar) / norm(deltaEar, 2)^3 + posEarth / norm(posEarth,2)^3);
-    
+    % Constants
+    radBennu = 250;                 % m
+    j2 = 3.9257534110e-2;
+
+    % Base 2-body terms
+    a = -muBody * rVec / r^3;
+    dfdr = muBody * (3*rVec*rVec' / r^5 - eye(3)/r^3);
+
+    % Start state Jacobian
+    A = zeros(6,6);
+    A(1:3,4:6) = eye(3);
+    A(4:6,1:3) = dfdr;
+
+    % -------------------------
+    % J2 terms
+    % -------------------------
+    j2leadingTerm = (-3*muBody*j2*radBennu^2) / (2*r^5);
+    j2BCI = j2leadingTerm * [ ...
+        rVec(1)*(1-5*(rVec(3)^2/r^2));
+        rVec(2)*(1-5*(rVec(3)^2/r^2));
+        rVec(3)*(3-5*(rVec(3)^2/r^2)) ];
+
+    dj2dx = -3*muBody*j2*radBennu^2 / (2*r^5) * ...
+        [5*rVec(1)*(7*rVec(3)^2/r^2 - 1)/r^2 * rVec' + ...
+         (1-5*rVec(3)^2/r^2) * [1,0,0] - ...
+         10*rVec(1)*rVec(3)/r^2 * [0,0,1]];
+
+    dj2dy = -3*muBody*j2*radBennu^2 / (2*r^5) * ...
+        [5*rVec(2)*(7*rVec(3)^2/r^2 - 1)/r^2 * rVec' + ...
+         (1-5*rVec(3)^2/r^2) * [0,1,0] - ...
+         10*rVec(2)*rVec(3)/r^2 * [0,0,1]];
+
+    dj2dz = -3*muBody*j2*radBennu^2 / (2*r^5) * ...
+        [5*rVec(3)*(7*rVec(3)^2/r^2 - 3)/r^2 * rVec' + ...
+         3*(1-5*rVec(3)^2/r^2) * [0,0,1]];
+
+    dj2dr = [dj2dx; dj2dy; dj2dz];
+
+    % -------------------------
+    % Sun + SRP terms
+    % -------------------------
+    G = 6.674e-11;
+    mSun = 1.989e30;
+    mInAU = 1.496192602435979E+11;
+
+    r_ben2sun = [1.36 * mInAU; 0; 0];
+    d = r_ben2sun - rVec;
+
+    a_sun = G*mSun * ( d / norm(d)^3 - r_ben2sun / norm(r_ben2sun)^3 );
+    daSun_dr = G*mSun * ( 3*(d*d')/norm(d)^5 - eye(3)/norm(d)^3 );
+
+    SF = 1353;
+    c = 3e8;
+    P_SR_1AU = SF/c;
+    P_SR = P_SR_1AU * (mInAU/norm(r_ben2sun))^2;
+    c_R = 0.6;
+    A_exposed = 14;
+    mSC = 800;
+
+    a_SRP = -P_SR*c_R*A_exposed*d/(mSC*norm(d));
+    daSRP_dr = -P_SR*c_R*A_exposed/mSC * (d*d'/norm(d)^3 - eye(3)/norm(d));
+
+    % -------------------------
+    % Select model
+    % -------------------------
+    switch lower(modelType)
+        case 'central'
+            % already set from 2-body only
+
+        case 'j2'
+            a = a + j2BCI;
+            A(4:6,1:3) = dfdr + dj2dr;
+
+        case 'full'
+            a = a + j2BCI + a_sun + a_SRP;
+            A(4:6,1:3) = dfdr + dj2dr + daSun_dr + daSRP_dr;
+
+        otherwise
+            error('Unknown modelType: %s. Use ''central'', ''j2'', or ''full''.', modelType);
+    end
+
+    % Add noise and control
+    a = a + aNoise + u;
+
+    % -------------------------
+    % Output by state size / flags
+    % -------------------------
+    if ~propSTM
+        dx = [vVec; a];
+        return
+    end
+
+    % STM case
+    phi = reshape(x(7:42), [6 6]);
+    phiDot = A * phi;
+
+    if ~propBk
+        dx = [vVec; a; reshape(phiDot, [36 1])];
+        return
+    end
+
+    % STM + Bk integral case
+    B = [zeros(3,3); eye(3)];
+    BkDot = phi \ B;
+
+    dx = [vVec;
+          a;
+          reshape(phiDot, [36 1]);
+          reshape(BkDot, [18 1])];
+end
+
+%Batch Least Squares Estimator
+function [estimate, R_bls] = BLS(meas_batch, R)
+    m = size(meas_batch,2);
+
+    Y = reshape(meas_batch, [3*m,1]);
+    Hbig = kron(ones(m,1), eye(3));
+    Rbig = kron(eye(m), R);
+
+    estimate = (Hbig' / Rbig * Hbig) \ (Hbig' / Rbig * Y);
+    R_bls = inv(Hbig' / Rbig * Hbig);
 end
