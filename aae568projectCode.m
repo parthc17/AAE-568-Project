@@ -129,6 +129,7 @@ for k = 1:length(rhoTransfer)
                  @(ya,yb) BVP_BC_mass(ya,yb,rEarth0,vEarth0,bennuStateFinal,m0Transfer), ...
                  sol, bvpOptions);
 end
+sol_transfer = sol;
 
 % Plot result
 figure;
@@ -148,6 +149,7 @@ t_mass = sol.x;
 y_mass = sol.y;
 
 m_hist = y_mass(7,:); 
+mf_transfer = m_hist(end);
 
 % Plot mass consumed
 m0Transfer = m_hist(1);
@@ -453,6 +455,94 @@ fprintf('\n------ Station-Keeping + EKF/BLS Summary ------\n');
 fprintf('Raw Measurement RMS Error:         %.4f m\n', rmsRawMeas);
 fprintf('BLS Measurement RMS Error:         %.4f m\n', rmsBLSMeas);
 fprintf('Closed-Loop Estimate RMS Error:    %.4f m\n', rmsEst);
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Part 3: Return Trip
+tfStation = tfStation/tStar;
+traveltime=14.5;
+tfReturn = tfStation + traveltime;
+tspanStation = linspace(0, tfStation, 80);
+tspanReturn = linspace(tfStation, tfReturn, 80);
+tspanReturn_Earth = linspace(0, tfReturn, 80);
+
+[tBennu_R, xBennuTraj_R] = ode45(@(t,x) cartesian(t,x,muSun), ...
+    tspanStation, [bennuStateFinal], opts);
+[tEarth_R, xEarthTraj_R] = ode45(@(t,x) cartesian(t,x,muSun), ...
+    tspanReturn_Earth, [rEarth0;vEarth0], opts);
+
+bennuState0_R = xBennuTraj_R(end,:);
+earthStateFinal_R = xEarthTraj_R(end,:);
+
+Initial_Guess = load('Return_GuessFinal_1405days_umax061.mat');
+sol = Initial_Guess.sol;
+uMaxReturn = 0.61;
+m0Return = mf_transfer;
+for rho = 40:-10:10
+    sol = bvp4c(@(t,x) BVP_ode_return_mass(t,x,rho,uMaxReturn), ...
+                            @(ya,yb) BVP_BC_return_mass(ya,yb,bennuState0_R,earthStateFinal_R,m0Return), ...
+                            sol, bvpOptions);
+end
+for rho = 10:-2:1
+    sol = bvp4c(@(t,x) BVP_ode_return_mass(t,x,rho,uMaxReturn), ...
+                            @(ya,yb) BVP_BC_return_mass(ya,yb,bennuState0_R,earthStateFinal_R,m0Return), ...
+                            sol, bvpOptions);
+end
+for rho = 1:-.2:.1
+    sol = bvp4c(@(t,x) BVP_ode_return_mass(t,x,rho,uMaxReturn), ...
+                            @(ya,yb) BVP_BC_return_mass(ya,yb,bennuState0_R,earthStateFinal_R,m0Return), ...
+                            sol, bvpOptions);
+end
+for rho = .1:-.01:.01
+    sol = bvp4c(@(t,x) BVP_ode_return_mass(t,x,rho,uMaxReturn), ...
+                            @(ya,yb) BVP_BC_return_mass(ya,yb,bennuState0_R,earthStateFinal_R,m0Return), ...
+                            sol, bvpOptions);
+end
+sol_Return = sol;
+
+% Plot result
+figure;
+hold on
+plot3(rEarth0(1),rEarth0(2),rEarth0(3),'o','MarkerSize',7)
+plot3(earthStateFinal_R(1),earthStateFinal_R(2),earthStateFinal_R(3),'go','MarkerSize',7)
+plot3(bennuStateFinal(1),bennuStateFinal(2),bennuStateFinal(3),'rx','MarkerSize',7)
+plot3(bennuState0_R(1),bennuState0_R(2),bennuState0_R(3),'bx','MarkerSize',7)
+plot3(xBennuTraj(:,1),xBennuTraj(:,2),xBennuTraj(:,3))
+plot3(xEarthTraj(:,1),xEarthTraj(:,2),xEarthTraj(:,3))
+plot3(0,0,0,'go','MarkerSize',15)
+axis equal
+grid on
+title('Earth-to-Bennu Transfer with Mass Dynamics')
+% plot3(solinit.y(1,:), solinit.y(2,:), solinit.y(3,:))
+plot3(sol.y(1,:), sol.y(2,:), sol.y(3,:))
+windowsize = 2;
+xlim([-windowsize,windowsize])
+ylim([-windowsize, windowsize])
+zlim([-windowsize,windowsize])
+legend('Earth Pos (t=0)', 'Earth Pos at End of Return', 'Bennu Pos when we reach', 'Bennu Pos when we leave','Bennu Traj', 'Earth Traj' , 'Sun', 'Solved Trajectory')
+
+uReturn = zeros(1, size(sol.y,2));
+for i = 1:size(sol.y, 2)
+    lr = sol.y(8:10, i);
+    lv = sol.y(11:13, i);
+    lm = sol.y(14, i);
+    m  = sol.y(7, i);
+    mEff = max(m, 1e-6);
+
+    % Control input setup
+    lvNorm = max(norm(lv,2), 1e-8);
+    uHatStar  = -lv / lvNorm;
+    S         = 1 + lv' * uHatStar / mEff - lm / (isp*g0);
+    gammaStar = 0.5 * uMaxReturn * (1 + tanh(-S / rho));
+    uReturn(i) = norm(gammaStar * uHatStar);
+end
+
+%Plot Input
+figure()
+plot(sol.x, uReturn)
+title('Optimal Input History')
+xlabel('Time (nondim)')
+ylabel('Input')
+grid()
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 function motion = BVP_ode_mass(t, x, rho, uMax)
 
@@ -669,4 +759,58 @@ function [estimate, R_bls] = BLS(meas_batch, R)
 
     estimate = (Hbig' / Rbig * Hbig) \ (Hbig' / Rbig * Y);
     R_bls = inv(Hbig' / Rbig * Hbig);
+end
+
+function motion = BVP_ode_return_mass(t, x, rho, uMax)
+
+    g0 = 1.654184883569765e+03;   % nondim
+    isp = 7.962226975300293e-04;  % nondim
+    muSun = 1;
+
+    % State and costate
+    state = x(1:7);
+    lambda = x(8:14);
+
+    r = state(1:3);
+    v = state(4:6);
+    m = state(7);
+
+    lr = lambda(1:3);
+    lv = lambda(4:6);
+    lm = lambda(7);
+
+    % Numerical floors
+    lvNorm = max(norm(lv,2), 1e-8);
+    mEff   = max(m, 1e-6);
+
+    % Control
+    uHatStar  = -lv / lvNorm;
+    S         = 1 + lv' * uHatStar / mEff - lm / (isp*g0);
+    gammaStar = 0.5 * uMax * (1 + tanh(-S / rho));
+    u         = gammaStar * uHatStar;
+
+    % Dynamics
+    dadr  = -muSun * (eye(3) / norm(r)^3 - 3 * (r * r') / norm(r)^5);
+    dadm  = -u / mEff^2;
+    accel = -r/(norm(r)^3) + u/mEff;
+
+    xDot = [v;
+            accel;
+            -norm(u,2)/(isp*g0)];
+
+    dfdx = [zeros(3,3), eye(3), zeros(3,1);
+            dadr,       zeros(3,3), dadm;
+            zeros(1,3), zeros(1,3), 0];
+
+    lamDot = (-lambda' * dfdx)';
+
+    motion = [xDot; lamDot];
+end
+
+function psi = BVP_BC_return_mass(ya, yb, bennuState0_R, earthStateFinal_R, m0Return)
+
+    psi = [ya(1:6) - bennuState0_R(1:6)';   % initial position/velocity
+           ya(7)   - m0Return;              % initial mass = final transfer mass
+           yb(1:6) - earthStateFinal_R(1:6)'; % terminal position/velocity
+           yb(14)];                         % free final mass => lambda_m(tf)=0
 end
