@@ -3,21 +3,27 @@ close all;
 %% Setup
 global x0 tf umax t_char l_char v_char a_char nondim
 nondim = true;
-umax = 1
-% umax = 0.01
+% umax = 1
+umax = 1e-6;
 muBennu = 5.2; % m^3/s^2
+    radBennu = 250; % m
+
 tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
 orbit = struct;
 orbit.a = 1.5e3; orbit.e = 0.05; orbit.i = deg2rad(45); 
 orbit.raan = 0; orbit.w = 0; orbit.f = 0;
 [r0,v0] = keplerian2eci(orbit.a,orbit.e,orbit.i,orbit.raan,orbit.w,orbit.f,muBennu);
-x0 = [r0; v0]
+x0 = [r0; v0];
 period = 2*pi*sqrt(orbit.a^3/muBennu); % s
-tf = period
+tf = period;
 t = linspace(0, tf, 500);
+dt = tf/500;
+B = [zeros(3); eye(3)];
 
-l_char = 1000
-t_char = 3600
+l_char = 1000;
+mu_char = muBennu;
+mu_nd = 1;
+t_char = sqrt(1/muBennu * l_char^3);
 v_char = l_char/t_char;
 a_char = l_char/t_char^2;
 
@@ -28,15 +34,34 @@ t_nd = t / t_char;
 
 %% Solve TPBVP
 solinit = bvpinit(t_nd, @(t) guess_ytraj(t, x0_nd, t_nd(end)));  % initial guess p = 1
-sol1 = bvp4c(@(t,x) state_coststate_dynamics(t,x, umax/a_char), ...
+% do min energy
+sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax/a_char, mu_nd, radBennu/l_char), ...
             @(y0, yf) bounds(y0, yf, x0_nd), solinit)
-sol = bvp4c(@(t,x) state_coststate_dynamics(t,x, umax/a_char), ...
-            @(y0, yf) bounds(y0, yf, x0_nd), sol1)
+sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax/a_char, mu_nd, radBennu/l_char), ...
+            @(y0, yf) bounds(y0, yf, x0_nd), sol)
+lm_ref = sol.y(7:12,:);
+u_ref = min_energy_control(lm_ref, B, umax/a_char) * a_char;
+dv = sum(vecnorm(u_ref,2,1))*dt;
+fprintf("Min energy dv = %.6f m/s\n", dv)
+% do min fuel
+rhos = [0.5, 0.1, 0.01, 0.001];
+for p=rhos
+    fprintf("Solveing rho = %.2f\n", p)
+    sol = bvp4c(@(t,x) state_coststate_dynamics_fuel(t,x, umax/a_char, mu_nd, radBennu/l_char, p), ...
+                @(y0, yf) bounds(y0, yf, x0_nd), sol)
+end
+sol = bvp4c(@(t,x) state_coststate_dynamics_fuel(t,x, umax/a_char, mu_nd, radBennu/l_char, 0.1), ...
+            @(y0, yf) bounds(y0, yf, x0_nd), sol)
+%
 y_ref = sol.y(1:6,:) .* x_scale;
 lm_ref = sol.y(7:12,:);
-B = [zeros(3); eye(3)];
-u_ref = min_energy_control(lm_ref, B, umax) * a_char;
-y_ref(1:6,end) - x0;
+u_ref = min_fuel_control(lm_ref, B, umax/a_char, p) * a_char;
+% u_ref = min_energy_control(lm_ref, B, umax/a_char) * a_char;
+dv = sum(vecnorm(u_ref,2,1))*dt;
+fprintf("Min fuel dv = %.6f m/s\n", dv)
+
+y_ref(1:6,end) - x0
+
 
 % Truth Propagation
 [t,y1] = ode45(@(t,x) bennuProp_old(t,x,muBennu), t, [r0;v0; reshape(eye(6),[36 1])], opts);
@@ -49,7 +74,9 @@ y_g = guess_ytraj(t, x0, tf);
 
 %% plot control
 figure()
-plot(t, u_ref)
+plot(t, u_ref), hold on
+plot(t, vecnorm(u_ref, 2, 1), "k")
+plot(xlim(), [umax, umax], "r--"), hold off
 xlabel("Time (s)"), ylabel("u [m/s2]"), grid(), legend(["ux", "uy", "uz"])
 figure()
 plot(t, lm_ref)
@@ -118,28 +145,9 @@ function dXdt = keplerian_dynamics(t, X) % not used?
     dXdt = [X(4:6); a];
 end
 
-function dxdt = state_coststate_dynamics(t, x, umax) % dynamics for TPBVP - mostly copied from Benuprop
-    global l_char t_char nondim
-    % nondim = True;
-    
-    if nondim
-        lscale = 1/l_char;
-        vscale = 1/(l_char/t_char);
-        ascale = 1/(l_char/t_char^2);
-        tscale = 1/t_char;
-    else
-        lscale = 1;
-        vscale = 1;
-        ascale = 1;
-        tscale = 1;
-    end
-    % with J2
-    % Constants
-    muBody = 5.2 * (lscale^3/tscale^2); % m^3/s^2
+function [a, A] = bennu_dynamics(x, muBody, radBennu)
     r = norm(x(1:3)); v = norm(x(4:6));
-    lm = x(7:12);
-    radBennu = 250 * lscale; % m
-    j2 = 3.9257534110e-2; % ND
+    j2 = 3.9257534110e-2;
 
     ag = -muBody * x(1:3) / r^3;%
     dfdr = muBody * (3*x(1:3)*x(1:3)' / r^5 - eye(3)/r^3);
@@ -153,10 +161,18 @@ function dxdt = state_coststate_dynamics(t, x, umax) % dynamics for TPBVP - most
     dj2dz = -3*muBody*j2*radBennu^2 / (2*r^5) * [5*x(1)*(7*x(3)^2/r^2 - 3)/r^2 * x(1:3)' + 3*(1-5*x(3)^2/r^2) * [0,0,1]];
     dj2dr = [dj2dx;dj2dy;dj2dz];
 
-    % costate
     A = zeros(6,6); A(1:3,4:6) = eye(3);
-    % A(4:6,1:3) = dfdr + dj2dr;
-    A(4:6,1:3) = dfdr;
+    A(4:6,1:3) = dfdr + dj2dr;
+    a = ag + j2BCI;
+end
+
+function dxdt = state_coststate_dynamics_energy(t, x, umax, muBody, radBennu) % dynamics for TPBVP - mostly copied from Benuprop    
+    % with J2
+    lm = x(7:12);
+
+    [a, A] = bennu_dynamics(x, muBody, radBennu);
+    
+    % costate
     dlmdt = - A' * lm;
 
     % control
@@ -165,9 +181,25 @@ function dxdt = state_coststate_dynamics(t, x, umax) % dynamics for TPBVP - most
     u = min_energy_control(lm, B, umax);
     % u = min_fuel_control(lm, B, umax);
 
-    % dxdt = [x(4:6); ag + j2BCI + u; dlmdt];
-    dxdt = [x(4:6); ag + u; dlmdt];
+    dxdt = [x(4:6); a + u; dlmdt];
+end
 
+function dxdt = state_coststate_dynamics_fuel(t, x, umax, muBody, radBennu, rho) % dynamics for TPBVP - mostly copied from Benuprop    
+    % with J2
+    lm = x(7:12);
+
+    [a, A] = bennu_dynamics(x, muBody, radBennu);
+    
+    % costate
+    dlmdt = - A' * lm;
+
+    % control
+    B = [zeros(3); eye(3)];
+
+    % u = min_energy_control(lm, B, umax);
+    u = min_fuel_control(lm, B, umax, rho);
+
+    dxdt = [x(4:6); a + u; dlmdt];
 end
 
 function resid = bounds(y0, yf, x0) % boundary conditions for TPBVP
@@ -184,7 +216,7 @@ function y = guess_ytraj(t, x0, tf) % initial guess traj - rotate x0 to make a c
     % tf = t(end);
     n = length(t);
     w = 2*pi/tf;
-    angles = w*t;
+    angles = -w*t;
     r = norm(x0(1:3));
     ax = cross(x0(4:6), x0(1:3));
     y = ones(12, n)*-.1;
@@ -203,10 +235,11 @@ function u = min_energy_control(lm, B, umax) % u* optimal control input for min 
     
 end
 
-function u = min_fuel_control(lm, B, umax) % u* optimal control input for min energy
+function u = min_fuel_control(lm, B, umax, rho) % u* optimal control input for min energy
     p = (-1/2*lm'*B)'; 
-    S = (vecnorm(p, 2, 1) > 1);
-    u = p./vecnorm(p, 2, 1) .* (S * umax);
+    % S = (vecnorm(p, 2, 1) > 1);
+    S = vecnorm(p, 2, 1)-1;
+    u = p./vecnorm(p, 2, 1) .* (umax/2 * (1 + tanh(S/rho)));
 end
 
 

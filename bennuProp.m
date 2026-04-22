@@ -49,8 +49,8 @@ function dx = bennuProp(t,x,muBody,propSTM,aNoise)
     %Partial derivative of SRP perturbation
     daSRP_dr = -P_SR*c_R*A_exposed/m*(d*d'/norm(d)^3 - eye(3)/norm(d));
 
-    % a = -muBody * x(1:3) / r^3 + j2BCI + a_sun + a_SR + aNoise; %All perturbations
-    a = -muBody * x(1:3) / r^3 + j2BCI + a_sun; %All perturbations
+    a = -muBody * x(1:3) / r^3 + j2BCI + a_sun + a_SR + aNoise; %All perturbations
+    % a = -muBody * x(1:3) / r^3 + j2BCI + a_sun; %All perturbations
 
     if propSTM
         phi = reshape(x(7:42), [6 6]);
