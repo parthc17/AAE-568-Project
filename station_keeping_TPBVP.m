@@ -4,9 +4,9 @@ close all;
 global x0 tf umax t_char l_char v_char a_char nondim
 nondim = true;
 % umax = 1
-umax = 1e-6;
+umax = 1e-8;
 muBennu = 5.2; % m^3/s^2
-    radBennu = 250; % m
+radBennu = 250; % m
 
 tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
 orbit = struct;
@@ -15,7 +15,7 @@ orbit.raan = 0; orbit.w = 0; orbit.f = 0;
 [r0,v0] = keplerian2eci(orbit.a,orbit.e,orbit.i,orbit.raan,orbit.w,orbit.f,muBennu);
 x0 = [r0; v0];
 period = 2*pi*sqrt(orbit.a^3/muBennu); % s
-tf = period;
+tf = 1*period;
 t = linspace(0, tf, 500);
 dt = tf/500;
 B = [zeros(3); eye(3)];
@@ -27,34 +27,50 @@ t_char = sqrt(1/muBennu * l_char^3);
 v_char = l_char/t_char;
 a_char = l_char/t_char^2;
 
+% l_char = 1;
+% % mu_char = muBennu;
+% mu_nd = muBennu;
+% t_char = 1;
+% v_char = l_char/t_char;
+% a_char = l_char/t_char^2;
+
 % NONDIM
 x_scale = [l_char, l_char, l_char, v_char, v_char, v_char]';
 x0_nd = x0 ./ x_scale;
 t_nd = t / t_char;
+use_SRP = false;
 
 %% Solve TPBVP
-solinit = bvpinit(t_nd, @(t) guess_ytraj(t, x0_nd, t_nd(end)));  % initial guess p = 1
+solinit = bvpinit(t_nd, @(t) guess_ytraj(t, x0_nd, period/t_char));  % initial guess p = 1
 % do min energy
-sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax/a_char, mu_nd, radBennu/l_char), ...
+sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax*100/a_char, mu_nd, radBennu/l_char, use_SRP), ...
             @(y0, yf) bounds(y0, yf, x0_nd), solinit)
-sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax/a_char, mu_nd, radBennu/l_char), ...
+lm_ref = sol.y(7:12,:);
+u_ref = min_energy_control(lm_ref, B, umax/a_char) * a_char;
+dv = sum(vecnorm(u_ref,2,1))*dt;
+fprintf("Min energy dv = %.6f m/s\n", dv)
+sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax*10/a_char, mu_nd, radBennu/l_char, use_SRP), ...
+            @(y0, yf) bounds(y0, yf, x0_nd), sol)
+sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax*1/a_char, mu_nd, radBennu/l_char, use_SRP), ...
             @(y0, yf) bounds(y0, yf, x0_nd), sol)
 lm_ref = sol.y(7:12,:);
 u_ref = min_energy_control(lm_ref, B, umax/a_char) * a_char;
 dv = sum(vecnorm(u_ref,2,1))*dt;
 fprintf("Min energy dv = %.6f m/s\n", dv)
 % do min fuel
-rhos = [0.5, 0.1, 0.01, 0.001];
+rhos = [0.5, 0.1, 0.001];
 for p=rhos
     fprintf("Solveing rho = %.2f\n", p)
-    sol = bvp4c(@(t,x) state_coststate_dynamics_fuel(t,x, umax/a_char, mu_nd, radBennu/l_char, p), ...
+    sol = bvp4c(@(t,x) state_coststate_dynamics_fuel(t,x, umax/a_char, mu_nd, radBennu/l_char, p, use_SRP), ...
                 @(y0, yf) bounds(y0, yf, x0_nd), sol)
 end
-sol = bvp4c(@(t,x) state_coststate_dynamics_fuel(t,x, umax/a_char, mu_nd, radBennu/l_char, 0.1), ...
-            @(y0, yf) bounds(y0, yf, x0_nd), sol)
-%
-y_ref = sol.y(1:6,:) .* x_scale;
-lm_ref = sol.y(7:12,:);
+% sol = bvp4c(@(t,x) state_coststate_dynamics_fuel(t,x, umax/a_char, mu_nd, radBennu/l_char, 0.1), ...
+%             @(y0, yf) bounds(y0, yf, x0_nd), sol)
+
+% t_new = linspace(t_fixed(1), t_fixed(end), 500);
+y_sol = deval(sol, t_nd); 
+y_ref = y_sol(1:6,:) .* x_scale;
+lm_ref = y_sol(7:12,:);
 u_ref = min_fuel_control(lm_ref, B, umax/a_char, p) * a_char;
 % u_ref = min_energy_control(lm_ref, B, umax/a_char) * a_char;
 dv = sum(vecnorm(u_ref,2,1))*dt;
@@ -105,6 +121,13 @@ axis equal
 camlight headlight
 xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)'); title('Asteroid Orbit Control Truth'); 
 
+
+%% save ref for lqr
+traj.x = y_ref';
+traj.u = u_ref;
+traj.t = t;
+traj.x0 = x0;
+save("min_energy_tpbvb.mat", "traj")
 %% Functions
 function dx = bennuProp_old(t,x,muBody) % with less perturbations
 
@@ -145,7 +168,9 @@ function dXdt = keplerian_dynamics(t, X) % not used?
     dXdt = [X(4:6); a];
 end
 
-function [a, A] = bennu_dynamics(x, muBody, radBennu)
+function [a, A] = bennu_dynamics(x, muBody, radBennu, a_char)
+    % make a_char 0 for no solar perturbs
+    global l_char
     r = norm(x(1:3)); v = norm(x(4:6));
     j2 = 3.9257534110e-2;
 
@@ -161,16 +186,46 @@ function [a, A] = bennu_dynamics(x, muBody, radBennu)
     dj2dz = -3*muBody*j2*radBennu^2 / (2*r^5) * [5*x(1)*(7*x(3)^2/r^2 - 3)/r^2 * x(1:3)' + 3*(1-5*x(3)^2/r^2) * [0,0,1]];
     dj2dr = [dj2dx;dj2dy;dj2dz];
 
+    % SRP stuff
+    if a_char > 0
+        G = 6.674e-11; % Universal gravitational constant, N*m^2/kg^2
+        m2 = 1.989e30; % Mass of the Sun, kg
+        mInAU = 1.496192602435979E+11; % m/AU
+        r_ben2sun = [1.36 * mInAU; 0; 0] / l_char;  % Bennu-to-Sun vector, m
+        r_sc = x(1:3);  %Spacecraft position relative to Bennu, m
+        d = r_ben2sun - r_sc;   % Sun-relative vector from spacecraft to Sun, m
+        % a_sun = G*m2 * ( d / norm(d)^3 - r_ben2sun / norm(r_ben2sun)^3 ); % Third-body perturbation acceleration due to Sun
+        SF = 1353; %Solar radiation constant, W/m^2
+        c = 3*10^8; %Speed of light, m/s
+        P_SR_1AU = SF/c; %Solar Pressure per m^2, at 1 AU
+        P_SR = P_SR_1AU * (mInAU/norm(r_ben2sun))^2; %Adjustment for being further than 1 AU
+        c_R = 0.6; %Reflectivity of the satellite
+        A_exposed = 14; %Exposed surface area of the satellite to the sun, m^2
+        m = 800; %Mass of the satellite, kg
+
+        C_SRP = -P_SR*c_R*A_exposed/m / a_char;
+        a_SR = C_SRP * d/(norm(d)); %Perturbation due to solar radiation pressure
+        daSRP_dr = C_SRP * (d*d'/norm(d)^3 - eye(3)/norm(d));
+    else
+        a_SR = 0;
+        daSRP_dr = 0;
+    end
+
     A = zeros(6,6); A(1:3,4:6) = eye(3);
-    A(4:6,1:3) = dfdr + dj2dr;
-    a = ag + j2BCI;
+    A(4:6,1:3) = dfdr + dj2dr + daSRP_dr;
+    a = ag + j2BCI + a_SR;
 end
 
-function dxdt = state_coststate_dynamics_energy(t, x, umax, muBody, radBennu) % dynamics for TPBVP - mostly copied from Benuprop    
+function dxdt = state_coststate_dynamics_energy(t, x, umax, muBody, radBennu, use_SRP) % dynamics for TPBVP - mostly copied from Benuprop    
+    global a_char
     % with J2
     lm = x(7:12);
 
-    [a, A] = bennu_dynamics(x, muBody, radBennu);
+    if use_SRP
+        [a, A] = bennu_dynamics(x, muBody, radBennu, a_char);
+    else
+        [a, A] = bennu_dynamics(x, muBody, radBennu, 0);
+    end
     
     % costate
     dlmdt = - A' * lm;
@@ -184,11 +239,17 @@ function dxdt = state_coststate_dynamics_energy(t, x, umax, muBody, radBennu) % 
     dxdt = [x(4:6); a + u; dlmdt];
 end
 
-function dxdt = state_coststate_dynamics_fuel(t, x, umax, muBody, radBennu, rho) % dynamics for TPBVP - mostly copied from Benuprop    
+function dxdt = state_coststate_dynamics_fuel(t, x, umax, muBody, radBennu, rho, use_SRP) % dynamics for TPBVP - mostly copied from Benuprop    
+    % with J2
+    global a_char
     % with J2
     lm = x(7:12);
 
-    [a, A] = bennu_dynamics(x, muBody, radBennu);
+    if use_SRP
+        [a, A] = bennu_dynamics(x, muBody, radBennu, a_char);
+    else
+        [a, A] = bennu_dynamics(x, muBody, radBennu, 0);
+    end
     
     % costate
     dlmdt = - A' * lm;
@@ -211,11 +272,11 @@ function resid = bounds(y0, yf, x0) % boundary conditions for TPBVP
     a=0;
 end
 
-function y = guess_ytraj(t, x0, tf) % initial guess traj - rotate x0 to make a circle
+function y = guess_ytraj(t, x0, period) % initial guess traj - rotate x0 to make a circle
     % global x0 tf
     % tf = t(end);
     n = length(t);
-    w = 2*pi/tf;
+    w = 2*pi/period;
     angles = -w*t;
     r = norm(x0(1:3));
     ax = cross(x0(4:6), x0(1:3));
