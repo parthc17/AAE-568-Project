@@ -17,7 +17,7 @@ x0 = [r0; v0];
 period = 2*pi*sqrt(orbit.a^3/muBennu); % s
 tf = 1*period;
 t = linspace(0, tf, 500);
-dt = tf/500;
+dt = tf/401;
 B = [zeros(3); eye(3)];
 
 l_char = 1000;
@@ -41,10 +41,14 @@ t_nd = t / t_char;
 use_SRP = false;
 
 %% Solve TPBVP
-solinit = bvpinit(t_nd, @(t) guess_ytraj(t, x0_nd, period/t_char));  % initial guess p = 1
+solinit = bvpinit(t_nd, @(t) guess_ytraj(t, x0_nd, period/t_char));  % initial guess energy
+
 % do min energy
 sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax*100/a_char, mu_nd, radBennu/l_char, use_SRP), ...
             @(y0, yf) bounds(y0, yf, x0_nd), solinit)
+sol = bvp4c(@(t,x) state_coststate_dynamics_energy(t,x, umax*100/a_char, mu_nd, radBennu/l_char, use_SRP), ...
+            @(y0, yf) bounds(y0, yf, x0_nd), sol)
+%%
 lm_ref = sol.y(7:12,:);
 u_ref = min_energy_control(lm_ref, B, umax/a_char) * a_char;
 dv = sum(vecnorm(u_ref,2,1))*dt;
@@ -127,7 +131,7 @@ traj.x = y_ref';
 traj.u = u_ref;
 traj.t = t;
 traj.x0 = x0;
-save("min_energy_tpbvb.mat", "traj")
+save("min_fuel_tpbvb.mat", "traj")
 %% Functions
 function dx = bennuProp_old(t,x,muBody) % with less perturbations
 

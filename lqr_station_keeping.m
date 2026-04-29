@@ -7,7 +7,8 @@ Aidan edits 4/16:
 - Changed Ak and Bk so that they are just from tk to t(k+1) instead of t0 to tk
 Hannah edits 4/23:
 - cleaned up code
-
+Hannah edits 4/27:
+use min fuel
 %}
 
 
@@ -16,26 +17,50 @@ rng(1)
 sig_a_truth = 1e-6;   % Process Noise, m/s^2, tune this
 muBennu = 5.2; % m^3/s^2
 tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
-orbit = struct;
-orbit.a = 1.5e3; orbit.e = 0.05; orbit.i = deg2rad(45); 
-orbit.raan = 0; orbit.w = 0; orbit.f = 0;
-[r0,v0] = keplerian2eci(orbit.a,orbit.e,orbit.i,orbit.raan,orbit.w,orbit.f,muBennu);
-x0 = [r0; v0];
-period = 2*pi*sqrt(orbit.a^3/muBennu); % s
-tf = 10*period;
-nt=5000;
-t = linspace(0, tf, nt);
-dtk = tf/nt;
+% orbit = struct;
+% orbit.a = 1.5e3; orbit.e = 0.05; orbit.i = deg2rad(45); 
+% orbit.raan = 0; orbit.w = 0; orbit.f = 0;
+% [r0,v0] = keplerian2eci(orbit.a,orbit.e,orbit.i,orbit.raan,orbit.w,orbit.f,muBennu);
+% x0 = [r0; v0];
+% period = 2*pi*sqrt(orbit.a^3/muBennu); % s
+% tf = 10*period;
+% nt=5000;
+% t = linspace(0, tf, nt);
 nx = 6; nu = 3;
+periods = 10;
 
 %% Reference traj
-[t,y1] = ode45(@(t,x) bennuProp_old_ABC(t,x,muBennu), t, [r0;v0; reshape(eye(6),[nx^2 1]); reshape(zeros(nx, nu),[nx*nu 1])], opts); % target
-x_ref = y1(:,1:6);
+% [t,y1] = ode45(@(t,x) bennuProp_old_ABC(t,x,muBennu), t, [r0;v0; reshape(eye(6),[nx^2 1]); reshape(zeros(nx, nu),[nx*nu 1])], opts); % target
+ref = load("min_fuel_tpbvb.mat");
+u_ref = ref.traj.u;
+x_ref = ref.traj.x;
+x0 = ref.traj.x0;
+X = [x0; reshape(eye(6),[nx^2 1]); reshape(zeros(nx, nu),[nx*nu 1])];
+y1 = zeros([60, size(ref.traj.x, 1)])';
+t = ref.traj.t;
+% dtk = tf/nt;
+nt = size(t, 1);
+for k = 1:(nt-1)
+    % Do propagation - hold control constant over [t(k), t(k+1)]
+    y1(k,:) = X;
+    [~, Y] = ode45(@(tt,xx) bennuProp_old_ABC(tt, xx, muBennu, u_ref(:,k)), ...
+                       [t(k) t(k+1)], X, opts);
+    X = Y(end,:);
+    X(1:6) = x_ref(k+1,:);
+
+end
+% x_ref = y1(:,1:6);
+y1 = repmat(y1(1:nt-1,:), periods, 1);
+dtk = ref.traj.t(2)-ref.traj.t(1);
+tf = periods * ref.traj.t(end);
+t = linspace(0, tf, tf/dtk);
 phi_hist = y1(:,(nx+1):(nx+nx^2));
 phi_hist = matrixify(phi_hist, 6, 6);
 Bk_int = matrixify(y1(:,(nx+nx^2+1):(nx+nx^2+nx*nu)), nx, nu);
 Bk_factor = pagemtimes(phi_hist, Bk_int);
 
+%% Control stuff
+nt = size(y1, 1);
 % Make actual Ak and Bk for (tk, tk+1)
 Ak_hist = zeros(size(phi_hist));
 Bk_hist = zeros(size(Bk_factor));
@@ -48,9 +73,11 @@ end
 Q = diag([1,1,1,.5,.5,.5]) * 1;
 R = diag([1,1,1]) * 1;
 
-Qf = Q*2; 
+Qf = Q*5; 
 K_hist = zeros(nu, nx, nt);
+Pk_hist = zeros(nx, nx, nt);
 Pk = Qf;
+Pk_hist(:,:,nt) = Qf;
 for k = nt-1:-1:1
     Ak = phi_hist(:,:,k+1) / phi_hist(:,:,k);
     Bk = Bk_factor(:,:,k+1) - Ak * Bk_factor(:,:,k);
@@ -59,21 +86,26 @@ for k = nt-1:-1:1
     K_hist(:,:,k) = S \ (Bk' * Pk * Ak);
 
     Pk = Q + Ak' * Pk * Ak - Ak' * Pk * Bk * (S \ (Bk' * Pk * Ak));
+    Pk_hist(:,:,k) = Pk;
 end
 
 % mpc stuff
-N = 10;
+N = 20;
 
 %% LQR Controlled 
 u_ref = zeros(nu, nt);
 
 x_lqr = zeros(nx, nt);
 x_mpc = zeros(nx, nt);
-u_hist = zeros(nu, nt-1);
+u_hist_lqr = zeros(nu, nt-1);
+u_hist_mpc = zeros(nu, nt-1);
 
 % Perturbed initial condition
-x_lqr(:,1) = [r0 + [10;10;10]; v0];
-x_mpc(:,1) = [r0 + [10;10;10]; v0];
+% d0 = [0, 0, 0]';
+% x_lqr(:,1) = [r0 + d0; v0];
+% x_mpc(:,1) = [r0 + d0; v0];
+x_lqr(:,1) = x0;
+x_mpc(:,1) = x0;
 
 for k = 1:nt-1
     % tracking error at sample time tk
@@ -81,12 +113,13 @@ for k = 1:nt-1
 
     % discrete-time TVLQR control
     u_k = u_ref(:,k) - K_hist(:,:,k) * (x_lqr(:,k) - x_ref(k,:)');
-    u_hist(:,k) = u_k;
+    u_hist_lqr(:,k) = u_k;
 
     % MPC LQR
-    K_mpc = mpc_control_linearized(Ak_hist, Bk_hist, k, R, Q, N, nt);
+    P_N = Pk_hist(:,:,min(k+N, nt));
+    K_mpc = mpc_control_linearized(Ak_hist, Bk_hist, k, R, Q, P_N, N, nt);
     u_k_mpc = u_ref(:,k) - K_mpc * (x_mpc(:,k) - x_ref(k,:)');
-
+    u_hist_mpc(:,k) = u_k_mpc;
     
     % Do propagation - hold control constant over [t(k), t(k+1)]
     aNoise_k = sig_a_truth * randn(3,1);
@@ -108,42 +141,52 @@ y4 = x_mpc.';
 
 
 %% Open Loop Traj
-[t,y2] = ode45(@(t,x) bennuProp(t,x,muBennu,false), t, [r0 + [10;10;10];v0], opts); % open loop
+w0 = randn([3,1]);
+[t,y2] = ode45(@(t,x) bennuProp(t,x,muBennu,false), t, [r0 + w0*1;v0], opts); % open loop
 
-err = y3(:,1:6) - y1(:,1:6);
+err1 = y3(:,1:6) - y1(:,1:6);
+err2 = y4(:,1:6) - y1(:,1:6);
 
 %% Tracking error plots
-err = y3(:,1:6) - y1(:,1:6);
 
 figure('Name','Tracking Error vs Time');
 
 subplot(2,1,1)
-plot(t, err(:,1:3), 'LineWidth', 1.2)
+% plot(t, err1(:,1:3), 'LineWidth', 1.2)
+plot(t, vecnorm(err1(:,1:3), 2, 2), 'LineWidth', 1.2), hold on
+plot(t, vecnorm(err2(:,1:3), 2, 2), 'LineWidth', 1.2), hold off
 grid on
 xlabel('Time (s)')
 ylabel('Position Error (m)')
 title('Position Tracking Error')
-legend('e_x', 'e_y', 'e_z', 'Location', 'best')
+% legend('e_x', 'e_y', 'e_z', 'Location', 'best')
+legend(["LQR", "MPC"])
 
 subplot(2,1,2)
-plot(t, err(:,4:6), 'LineWidth', 1.2)
+% plot(t, err1(:,4:6), 'LineWidth', 1.2)
+plot(t, vecnorm(err1(:,4:6), 2, 2), 'LineWidth', 1.2), hold on
+plot(t, vecnorm(err2(:,4:6), 2, 2), 'LineWidth', 1.2), hold off
 grid on
 xlabel('Time (s)')
 ylabel('Velocity Error (m/s)')
 title('Velocity Tracking Error')
-legend('e_{v_x}', 'e_{v_y}', 'e_{v_z}', 'Location', 'best')
+% legend('e_{v_x}', 'e_{v_y}', 'e_{v_z}', 'Location', 'best')
+legend(["LQR", "MPC"])
+
 
 
 %% Control history plot
-u_hist = u_ref - squeeze(pagemtimes(K_hist, reshape(err', nx, 1, nt)));
+% u_hist_lqr = u_ref - squeeze(pagemtimes(K_hist, reshape(err1', nx, 1, nt)));
 
 figure('Name','LQR Control Correction vs Time');
-plot(t, squeeze(u_hist), 'LineWidth', 1.2)
+plot(t(1:end-1), squeeze(vecnorm(u_hist_lqr, 2, 1)), 'LineWidth', 1.2), hold on
+plot(t(1:end-1), squeeze(vecnorm(u_hist_mpc, 2, 1)), 'LineWidth', 1.2), hold off
 grid on
 xlabel('Time (s)')
 ylabel('Control Acceleration (m/s^2)')
 title('LQR Control Correction History')
-legend('u_x', 'u_y', 'u_z', 'Location', 'best')
+% legend('u_x', 'u_y', 'u_z', 'Location', 'best')
+legend(["LQR", "MPC"])
 
 
 %% 3D trajectory comparison
@@ -184,7 +227,7 @@ ylabel('||x_{ctrl} - x_{ref}||');
 
 
 %% functions
-function dx = bennuProp_old_ABC(t,x,muBody)
+function dx = bennuProp_old_ABC(t,x,muBody, u)
 
     % Constants
     r = norm(x(1:3)); v = norm(x(4:6)); phi = reshape(x(7:42), [6 6]);
@@ -203,14 +246,14 @@ function dx = bennuProp_old_ABC(t,x,muBody)
     dj2dr = [dj2dx;dj2dy;dj2dz];
 
     % J3 Acceleration and Partials
-    j3termXY = 5*muBody*radBennu^3*j3 / (2*r^7);
-    j3termZ = muBody*radBennu^3*j3 / (2*r^5);
-    j3BCI = [j3termXY * (7*x(3)^2 / r^2 - 3) * x(3)*x(1); j3termXY * (7*x(3)^2 / r^2 - 3) * x(3)*x(2); j3termZ * (3 - 30*x(3)^2/r^2 + 35*x(3)^4/r^4)];
+    % j3termXY = 5*muBody*radBennu^3*j3 / (2*r^7);
+    % j3termZ = muBody*radBennu^3*j3 / (2*r^5);
+    % j3BCI = [j3termXY * (7*x(3)^2 / r^2 - 3) * x(3)*x(1); j3termXY * (7*x(3)^2 / r^2 - 3) * x(3)*x(2); j3termZ * (3 - 30*x(3)^2/r^2 + 35*x(3)^4/r^4)];
 
-    a = -muBody * x(1:3) / r^3;% + j2BCI;% + j3BCI;
+    a = -muBody * x(1:3) / r^3 + j2BCI + u; % + j3BCI;
 
     A = zeros(6,6); A(1:3,4:6) = eye(3);
-    A(4:6,1:3) = dfdr;% + dj2dr;
+    A(4:6,1:3) = dfdr + dj2dr;
 
     B = [zeros(3); eye(3)];
 
@@ -221,11 +264,12 @@ function dx = bennuProp_old_ABC(t,x,muBody)
 
 end
 
-function K = mpc_control_linearized(Ak_hist, Bk_hist, k, R, Q, N, kmax)
+function K = mpc_control_linearized(Ak_hist, Bk_hist, k, R, Q, P_N, N, kmax)
     % Make big matrices
     n = size(Ak_hist, 1);
     m = size(Bk_hist, 2);
     Qb = kron(eye(N), Q); % N blkdiag of Q
+    Qb(end-n+1:end, end-n+1:end) = P_N;
     Rb = kron(eye(N), R); % N blkdiag of R
     Kn = [eye(m), zeros(m, m*(N-1))];
     H = zeros(N*n, n);
