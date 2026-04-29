@@ -47,27 +47,36 @@ for k = 1:(nt-1)
                        [t(k) t(k+1)], X, opts);
     X = Y(end,:);
     X(1:6) = x_ref(k+1,:);
-
 end
+y1(nt,:) = X;
 % x_ref = y1(:,1:6);
-y1 = repmat(y1(1:nt-1,:), periods, 1);
-dtk = ref.traj.t(2)-ref.traj.t(1);
-tf = periods * ref.traj.t(end);
-t = linspace(0, tf, tf/dtk);
+% y1 = repmat(y1(1:nt-1,:), periods, 1);
+%% Get Ak, Bk, expand
 phi_hist = y1(:,(nx+1):(nx+nx^2));
 phi_hist = matrixify(phi_hist, 6, 6);
 Bk_int = matrixify(y1(:,(nx+nx^2+1):(nx+nx^2+nx*nu)), nx, nu);
 Bk_factor = pagemtimes(phi_hist, Bk_int);
 
-%% Control stuff
-nt = size(y1, 1);
 % Make actual Ak and Bk for (tk, tk+1)
 Ak_hist = zeros(size(phi_hist));
 Bk_hist = zeros(size(Bk_factor));
+% last item in hist will be zeros - discard
 for k = 1:(size(phi_hist, 3)-1)
     Ak_hist(:,:,k) = phi_hist(:,:,k+1) / phi_hist(:,:,k);
     Bk_hist(:,:,k) = Bk_factor(:,:,k+1) - Ak_hist(:,:,k) * Bk_factor(:,:,k);
 end
+
+% repeat for multiple orbits
+nt = (size(y1, 1)-1)*periods;
+dtk = ref.traj.t(2)-ref.traj.t(1);
+tf = periods * ref.traj.t(end);
+t = linspace(0, tf, tf/dtk);
+
+% repeat, but get rid of last one because it would duplicate IC and is 0
+Ak_hist = repmat(Ak_hist(:,:,1:end-1), 1, 1, periods);
+Bk_hist = repmat(Bk_hist(:,:,1:end-1), 1, 1, periods);
+x_ref = repmat(x_ref(1:end-1, :), periods, 1);
+u_ref = repmat(u_ref(:, 1:end-1), 1, periods);
 
 % compute Ks for LQR (backwards in time)
 Q = diag([1,1,1,.5,.5,.5]) * 1;
@@ -79,8 +88,10 @@ Pk_hist = zeros(nx, nx, nt);
 Pk = Qf;
 Pk_hist(:,:,nt) = Qf;
 for k = nt-1:-1:1
-    Ak = phi_hist(:,:,k+1) / phi_hist(:,:,k);
-    Bk = Bk_factor(:,:,k+1) - Ak * Bk_factor(:,:,k);
+    % Ak = phi_hist(:,:,k+1) / phi_hist(:,:,k);
+    % Bk = Bk_factor(:,:,k+1) - Ak * Bk_factor(:,:,k);
+    Ak = Ak_hist(:,:,k);
+    Bk = Bk_hist(:,:,k);
 
     S = R + Bk' * Pk * Bk;
     K_hist(:,:,k) = S \ (Bk' * Pk * Ak);
@@ -93,7 +104,7 @@ end
 N = 20;
 
 %% LQR Controlled 
-u_ref = zeros(nu, nt);
+% u_ref = zeros(nu, nt);
 
 x_lqr = zeros(nx, nt);
 x_mpc = zeros(nx, nt);
@@ -141,11 +152,11 @@ y4 = x_mpc.';
 
 
 %% Open Loop Traj
-w0 = randn([3,1]);
-[t,y2] = ode45(@(t,x) bennuProp(t,x,muBennu,false), t, [r0 + w0*1;v0], opts); % open loop
+% w0 = randn([3,1]);
+[t,y2] = ode45(@(t,x) bennuProp(t,x,muBennu,false), t, x0, opts); % open loop
 
-err1 = y3(:,1:6) - y1(:,1:6);
-err2 = y4(:,1:6) - y1(:,1:6);
+err1 = y3(:,1:6) - x_ref;
+err2 = y4(:,1:6) - x_ref;
 
 %% Tracking error plots
 
@@ -219,7 +230,7 @@ title('Asteroid Orbit Control Trajectories')
 legend('Location', 'best')
 hold off
 
-err_norm = vecnorm((y3(:,1:6) - y1(:,1:6))',2,1);
+err_norm = vecnorm((y3(:,1:6) - x_ref)',2,1);
 figure; plot(t, err_norm); grid on
 title('Tracking Error Norm');
 xlabel('Time (s)');
