@@ -7,6 +7,7 @@ nondim = true;
 umax = 1e-8;
 muBennu = 5.2; % m^3/s^2
 radBennu = 250; % m
+tscale = 3600;
 
 tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
 orbit = struct;
@@ -16,8 +17,9 @@ orbit.raan = 0; orbit.w = 0; orbit.f = 0;
 x0 = [r0; v0];
 period = 2*pi*sqrt(orbit.a^3/muBennu); % s
 tf = 1*period;
-t = linspace(0, tf, 500);
-dt = tf/401;
+steps = 201;
+t = linspace(0, tf, steps);
+dt = tf/steps;
 B = [zeros(3); eye(3)];
 
 l_char = 1000;
@@ -93,14 +95,17 @@ y1(end,1:6)' - x0;
 y_g = guess_ytraj(t, x0, tf);
 
 %% plot control
+% t = t/tscale;
 figure()
-plot(t, u_ref), hold on
-plot(t, vecnorm(u_ref, 2, 1), "k")
+plot(t/tscale, u_ref, LineWidth=1.2), hold on
+plot(t/tscale, vecnorm(u_ref, 2, 1), "k", LineWidth=1.2)
 plot(xlim(), [umax, umax], "r--"), hold off
-xlabel("Time (s)"), ylabel("u [m/s2]"), grid(), legend(["ux", "uy", "uz"])
+xlabel("Time (hours)"), ylabel("u [m/s2]"), grid(), legend(["ux", "uy", "uz"])
+title("Min-Fuel Control Input")
+
 figure()
-plot(t, lm_ref)
-xlabel("Time (s)"), ylabel("Costate [ND]"), grid(),
+plot(t/tscale, lm_ref)
+xlabel("Time (hours)"), ylabel("Costate [ND]"), grid(),
 
 %% Plot 3d plot
 figure; 

@@ -28,6 +28,7 @@ tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
 % t = linspace(0, tf, nt);
 nx = 6; nu = 3;
 periods = 10;
+tscale = 3600; 
 
 %% Reference traj
 % [t,y1] = ode45(@(t,x) bennuProp_old_ABC(t,x,muBennu), t, [r0;v0; reshape(eye(6),[nx^2 1]); reshape(zeros(nx, nu),[nx*nu 1])], opts); % target
@@ -38,8 +39,8 @@ x0 = ref.traj.x0;
 X = [x0; reshape(eye(6),[nx^2 1]); reshape(zeros(nx, nu),[nx*nu 1])];
 y1 = zeros([60, size(ref.traj.x, 1)])';
 t = ref.traj.t;
-% dtk = tf/nt;
 nt = size(t, 1);
+np = nt;
 for k = 1:(nt-1)
     % Do propagation - hold control constant over [t(k), t(k+1)]
     y1(k,:) = X;
@@ -79,10 +80,18 @@ x_ref = repmat(x_ref(1:end-1, :), periods, 1);
 u_ref = repmat(u_ref(:, 1:end-1), 1, periods);
 
 % compute Ks for LQR (backwards in time)
-Q = diag([1,1,1,.5,.5,.5]) * 1;
-R = diag([1,1,1]) * 1;
+% Q = diag([1,1,1,.5,.5,.5]) * 1;
+% R = diag([1,1,1]) * 1;
 
-Qf = Q*5; 
+max_pos_err = .5;      % m    - max acceptable position error
+max_vel_err = 0.02;    % m/s  - max acceptable velocity error  
+max_u       = 1e-8;    % m/s^2 - max acceptable control input
+
+Q = diag(1 ./ [max_pos_err, max_pos_err, max_pos_err, ...
+               max_vel_err, max_vel_err, max_vel_err].^2);
+R = diag(1 ./ [max_u, max_u, max_u].^2);
+Qf = Q; 
+
 K_hist = zeros(nu, nx, nt);
 Pk_hist = zeros(nx, nx, nt);
 Pk = Qf;
@@ -101,7 +110,8 @@ for k = nt-1:-1:1
 end
 
 % mpc stuff
-N = 20;
+N = floor(0.25*np)
+% N = 5;
 
 %% LQR Controlled 
 % u_ref = zeros(nu, nt);
@@ -118,6 +128,8 @@ u_hist_mpc = zeros(nu, nt-1);
 x_lqr(:,1) = x0;
 x_mpc(:,1) = x0;
 
+% lqr
+tic;
 for k = 1:nt-1
     % tracking error at sample time tk
     % err_k = x_lqr(:,k) - x_ref(k,:)';
@@ -125,6 +137,21 @@ for k = 1:nt-1
     % discrete-time TVLQR control
     u_k = u_ref(:,k) - K_hist(:,:,k) * (x_lqr(:,k) - x_ref(k,:)');
     u_hist_lqr(:,k) = u_k;
+    
+    % Do propagation - hold control constant over [t(k), t(k+1)]
+    aNoise_k = sig_a_truth * randn(3,1);
+    [~, y_seg_lqr] = ode45(@(tt,xx) bennuProp_controlled(tt, xx, muBennu, aNoise_k, u_k), ...
+                       [t(k) t(k+1)], x_lqr(:,k), opts);
+
+    x_lqr(:,k+1) = y_seg_lqr(end,:)';
+end
+fprintf("LQR Time: %.2f s\n", toc)
+
+% mpc
+tic;
+for k = 1:nt-1
+    % tracking error at sample time tk
+    % err_k = x_lqr(:,k) - x_ref(k,:)';
 
     % MPC LQR
     P_N = Pk_hist(:,:,min(k+N, nt));
@@ -134,15 +161,14 @@ for k = 1:nt-1
     
     % Do propagation - hold control constant over [t(k), t(k+1)]
     aNoise_k = sig_a_truth * randn(3,1);
-    [~, y_seg_lqr] = ode45(@(tt,xx) bennuProp_controlled(tt, xx, muBennu, aNoise_k, u_k), ...
-                       [t(k) t(k+1)], x_lqr(:,k), opts);
     [~, y_seg_mpc] = ode45(@(tt,xx) bennuProp_controlled(tt, xx, muBennu, aNoise_k, u_k_mpc), ...
                    [t(k) t(k+1)], x_mpc(:,k), opts);
 
-    x_lqr(:,k+1) = y_seg_lqr(end,:)';
     x_mpc(:,k+1) = y_seg_mpc(end,:)';
 
 end
+fprintf("MPC Time: %.2f s\n", toc)
+
 
 y3 = x_lqr.';
 y4 = x_mpc.';
@@ -164,10 +190,10 @@ figure('Name','Tracking Error vs Time');
 
 subplot(2,1,1)
 % plot(t, err1(:,1:3), 'LineWidth', 1.2)
-plot(t, vecnorm(err1(:,1:3), 2, 2), 'LineWidth', 1.2), hold on
-plot(t, vecnorm(err2(:,1:3), 2, 2), 'LineWidth', 1.2), hold off
+plot(t/tscale, vecnorm(err1(:,1:3), 2, 2), 'LineWidth', 1.2), hold on
+plot(t/tscale, vecnorm(err2(:,1:3), 2, 2), 'LineWidth', 1.2), hold off
 grid on
-xlabel('Time (s)')
+xlabel('Time (hours)')
 ylabel('Position Error (m)')
 title('Position Tracking Error')
 % legend('e_x', 'e_y', 'e_z', 'Location', 'best')
@@ -175,30 +201,32 @@ legend(["LQR", "MPC"])
 
 subplot(2,1,2)
 % plot(t, err1(:,4:6), 'LineWidth', 1.2)
-plot(t, vecnorm(err1(:,4:6), 2, 2), 'LineWidth', 1.2), hold on
-plot(t, vecnorm(err2(:,4:6), 2, 2), 'LineWidth', 1.2), hold off
+plot(t/tscale, vecnorm(err1(:,4:6), 2, 2), 'LineWidth', 1.2), hold on
+plot(t/tscale, vecnorm(err2(:,4:6), 2, 2), 'LineWidth', 1.2), hold off
 grid on
 xlabel('Time (s)')
 ylabel('Velocity Error (m/s)')
 title('Velocity Tracking Error')
 % legend('e_{v_x}', 'e_{v_y}', 'e_{v_z}', 'Location', 'best')
 legend(["LQR", "MPC"])
-
-
+fig = gcf();
+saveas(fig, "Controller_error.png")
 
 %% Control history plot
 % u_hist_lqr = u_ref - squeeze(pagemtimes(K_hist, reshape(err1', nx, 1, nt)));
 
 figure('Name','LQR Control Correction vs Time');
-plot(t(1:end-1), squeeze(vecnorm(u_hist_lqr, 2, 1)), 'LineWidth', 1.2), hold on
-plot(t(1:end-1), squeeze(vecnorm(u_hist_mpc, 2, 1)), 'LineWidth', 1.2), hold off
+plot(t(1:end-1)/tscale, squeeze(vecnorm(u_hist_lqr, 2, 1)), 'LineWidth', 0.8), hold on
+plot(t(1:end-1)/tscale, squeeze(vecnorm(u_hist_mpc, 2, 1)), 'LineWidth', 0.8), hold off
 grid on
-xlabel('Time (s)')
+xlabel('Time (hours)')
 ylabel('Control Acceleration (m/s^2)')
 title('LQR Control Correction History')
 % legend('u_x', 'u_y', 'u_z', 'Location', 'best')
 legend(["LQR", "MPC"])
 
+fig = gcf();
+saveas(fig, "Controller_u.png")
 
 %% 3D trajectory comparison
 figure('Name','3D Trajectory Comparison');
@@ -280,7 +308,7 @@ function K = mpc_control_linearized(Ak_hist, Bk_hist, k, R, Q, P_N, N, kmax)
     n = size(Ak_hist, 1);
     m = size(Bk_hist, 2);
     Qb = kron(eye(N), Q); % N blkdiag of Q
-    Qb(end-n+1:end, end-n+1:end) = P_N;
+    Qb(end-n+1:end, end-n+1:end) = Qb(end-n+1:end, end-n+1:end) + P_N;
     Rb = kron(eye(N), R); % N blkdiag of R
     Kn = [eye(m), zeros(m, m*(N-1))];
     H = zeros(N*n, n);
@@ -290,11 +318,11 @@ function K = mpc_control_linearized(Ak_hist, Bk_hist, k, R, Q, P_N, N, kmax)
     for i = 1:min(N,kmax-k) % rows
         A_stack = eye(n);
         G_row = zeros(n, m*(N));
-        for j = i:1 % nonzero G cols or H rows
+        for j = i:-1:1 % nonzero G cols or H rows
             % B = Bk_hist(k+i-1);
             G_row(:, j:(j+m-1)) = A_stack * Bk_hist(:,:,k+j-1);
             if j ~= 1 % the last update of A_stack isn't used so don't compute it so it doesnt break the end
-                A_stack = A_stack * Ak_hist(:,:,k+j+2);
+                A_stack = A_stack * Ak_hist(:,:,k+j);
             end
             % H(((i-1)*n+1):(i*n), :) = A^i;
         end
@@ -305,77 +333,9 @@ function K = mpc_control_linearized(Ak_hist, Bk_hist, k, R, Q, P_N, N, kmax)
     
     F = G' * Qb * H;
     L = G' * Qb * G + Rb;
-    K = Kn / L * F;
+    K = Kn * (L \ F);
 end
 
-% function dxdt_lqr = bennuProp_lqr(t, x, muBody, x_ref, u_ref, K_hist, dtk)
-%     % x_ref, u_ref shape [n x nk] (transpose from ode)
-%     % NOTE: Using K from Ak, Bk from REFERENCE, not actual traj. 
-%     % but this could be modified to calculate Ak, Bk on actual traj
-%     nt = size(x_ref, 2); % number of k steps
-%     tspan = linspace(0,nt*dtk, nt);
-%     k = min(floor(t/dtk) + 1, nt);
-% 
-%     dxdt = bennuProp(t,x, muBody, false); % get dynamics from propagator function
-%     err = x - interp1(tspan, x_ref', t, "cubic")';
-%     % NOTE: should K be interpolated? Or maybe just use the continuous one
-%     % instead
-%     uk = u_ref(:,k) - K_hist(:,:,k) * err;
-%     B = [zeros(3); eye(3)]; % B =/= Bk!
-%     dxdt_lqr = dxdt + B * uk;
-% end
-
-%% Stuff from ACA
-% x0 = [r0;v0;log(m0)];
-% Y0 = [x0;phi0];
-% traj = ode45(@(t,x) eomstm(t,x, g, alpha), tspan, Y0, options);
-% Y = deval(traj, 10);
-% Ak = matrixify(Y(nx+1:nx+nx^2), nx, nx)
-% Bk = Ak * matrixify(Y(nx+nx^2+1:nx+nx^2+nx*nu), nx, nu)
-% Ck = Ak * matrixify(Y(nx+nx^2+nx*nu+1:nx+nx^2+nx*nu+nx), nx, 1)
-
-% Numerical Solution
-% k_out = ode45(@(t,x) k_ode(t,x, A, B, P, Q, R), fliplr(tspan), K0, options);
-% 
-% K_hist = flip(matrixify(k_out.y', n, n),3); % flipped so in time order
-% 
-% tk = k_out.x;
-% [t1,x] = ode45(@(t,x) x_ode(t,x, A, B, P, Q, R, k_out), flip(tk), x0, options);
-% x1 = reshape(x',n,1,[]);
-% lm1 = pagemtimes(K_hist, x1);
-% % u = -R\(P'*x + B'*y);
-% u1 = pagemtimes(-inv(R), (pagemtimes(P, 'transpose', x1, 'none') + pagemtimes(B, 'transpose', lm1, 'none')));
-
-% function k_dot = k_ode(t,x, A, B, P, Q, R)
-%     % x = [x, K]'
-%     n = length(A);
-%     % m = length(R);
-%     % x = X(1:n);
-%     K = reshape(x, n, n);
-% 
-%     % u = -R\(P'+B'*K)*x; % omptimal control u
-%     % x_dot = A*x + B*u;
-% 
-%     k_dot = -K * (A - B/R*(P' + B'*K)) - Q + P/R*(P' + B'*K) - A'*K;
-%     k_dot = reshape(k_dot, 16, 1);
-%     % dXdt = [x_dot; k_dot];
-% end
-% 
-% function x_dot = x_ode(t,x, A, B, P, Q, R, K_hist)
-%     % x = [x, K]'
-%     n = length(A);
-%     % m = length(R);
-%     % x = X(1:n);
-%     K = deval(K_hist, t);
-%     K = reshape(K, n, n);
-% 
-%     u = -R\(P'+B'*K)*x; % omptimal control u
-%     x_dot = A*x + B*u;
-% 
-%     % k_dot = -K * (A - B/R*(P' + B'*K)) - Q + P/R*(P' + B'*K) - A'*K;
-%     % k_dot = reshape(k_dot, 16, 1);
-%     % dXdt = [x_dot; k_dot];
-% end
 
 %Dynamics
 function dx = bennuProp(t,x,muBody,propSTM,aNoise)
