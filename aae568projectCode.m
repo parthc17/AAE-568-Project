@@ -95,7 +95,7 @@ dtStation = tfStation / ntStation;
 
 nx = 6;
 nu = 3;
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Part 1 - Obtain trajectory to Bennu
 
 [rBennu0,vBennu0] = keplerian2eci( ...
@@ -187,11 +187,9 @@ title('Optimal Input History')
 xlabel('Time (nondim)')
 ylabel('Input')
 grid()
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Part 2 - Station Keeping with EKF+BLS State Feedback
-
-rng(1)
 
 % Use shared setup values
 r0Station = x0Bennu(1:3);
@@ -229,83 +227,159 @@ for k = ntStation-1:-1:1
 end
 
 %% EKF + BLS settings
-sigMeas = 2;                          % raw measurement std dev [m]
-measStride =2;                       % measurement every 2 steps, roughly 10 minutes
-measBatchCount = 100;                 % number of raw measurements per batch
+sigMeas = 2;
+measStride = 2;
+measBatchCount = 1:2:101;
 
 H_meas = [eye(3) zeros(3,3)];
-Q_ekf = diag([1e-6, 1e-6, 1e-6, 1e-10, 1e-10, 1e-10]);
+Q_ekf = 5*diag([1e-6, 1e-6, 1e-6, 1e-10, 1e-10, 1e-10]);
 R_raw = sigMeas^2 * eye(3);
 
-%% Truth + estimate + control histories
-uRef = zeros(nu, ntStation);
+numCases = numel(measBatchCount);
+maxBatch = max(measBatchCount);
 
-xTruth = zeros(nx, ntStation);
-xEst   = zeros(nx, ntStation);
-uHist  = zeros(nu, ntStation-1);
+% Fixed random realizations for fair comparison
+rng(1);
+processNoiseAll = sig_a_truth * randn(3, ntStation-1);
+%processNoiseAll = kron(ones(1, ntStation-1), sig_a_truth * randn(3, 1));
+measNoiseAll = sigMeas * randn(3, maxBatch, ntStation);
 
-rawMeasHist = NaN(3, ntStation);
-blsMeasHist = NaN(3, ntStation);
+% Summary metrics
+runtimeTotal = zeros(1, numCases);
+runtimeBLS = zeros(1, numCases);
+rmsEstCases = zeros(1, numCases);
+rmsRawCases = zeros(1, numCases);
+rmsBLSCases = zeros(1, numCases);
 
-PHist = zeros(nx, nx, ntStation);
-PHist(:,:,1) = cov0;
+for iCase = 1:numCases
+    batchSize = measBatchCount(iCase);
 
-% Initial conditions
-xTruth(:,1) = [r0Station + [10;10;10]; v0Station];
-xEst(:,1)   = [r0Station + sigMeas*randn(3,1); v0Station + sigMeas*randn(3,1)];
+    % Reinitialize states for this case
+    uRef = zeros(nu, ntStation);
+    xTruth = zeros(nx, ntStation);
+    xEst   = zeros(nx, ntStation);
+    uHist  = zeros(nu, ntStation-1);
 
-%% Closed-loop simulation with EKF+BLS in the loop
-for k = 1:ntStation-1
-    % Controller uses estimated state
-    errEst_k = xEst(:,k) - xRef(k,:)';
-    u_k = uRef(:,k) - KHist(:,:,k) * errEst_k;
-    uHist(:,k) = u_k;
+    rawMeasHist = NaN(3, ntStation);
+    blsMeasHist = NaN(3, ntStation);
+    PHist = zeros(nx, nx, ntStation);
+    PHist(:,:,1) = cov0;
 
-    % Propagate truth with process noise and applied control
-    aNoise_k = sig_a_truth * randn(3,1);
-    [~, yTruthSeg] = ode45( ...
-        @(tt,xx) bennuProp(tt, xx, muBennu, false, aNoise_k, u_k, 'full', false), ...
-        [tStation(k) tStation(k+1)], ...
-        xTruth(:,k), ...
-        opts);
+    xTruth(:,1) = [r0Station + [10;10;10]; v0Station];
+    xEst(:,1)   = [r0Station + measNoiseAll(:,1,1); v0Station];
 
-    xTruth(:,k+1) = yTruthSeg(end,:)';
+    blsTimeAccum = 0;
+    totalTimer = tic;
+    ODE_timer_accum = 0;
+    for k = 1:ntStation-1
+        % Controller uses estimated state
+        errEst_k = xEst(:,k) - xRef(k,:)';
+        u_k = uRef(:,k) - KHist(:,:,k) * errEst_k;
+        uHist(:,k) = u_k;
 
-    % EKF prediction: same control, no process noise
-    xAug0 = [xEst(:,k); reshape(eye(6), [36 1])];
-    [~, yPredSeg] = ode45( ...
-        @(tt,xx) bennuProp(tt, xx, muBennu, true, [0;0;0], u_k, 'full', false), ...
-        [tStation(k) tStation(k+1)], ...
-        xAug0, ...
-        opts);
+        % Truth propagation with fixed pre-generated process noise
+        ODE_timer = tic;
+        aNoise_k = processNoiseAll(:,k);
+        [~, yTruthSeg] = ode45( ...
+            @(tt,xx) bennuProp(tt, xx, muBennu, false, aNoise_k, u_k, 'full', false), ...
+            [tStation(k) tStation(k+1)], ...
+            xTruth(:,k), ...
+            opts);
 
-    xBar = yPredSeg(end,1:6)';
-    phiPred = reshape(yPredSeg(end,7:42), [6 6]);
-    PBar = phiPred * PHist(:,:,k) * phiPred' + Q_ekf;
+        xTruth(:,k+1) = yTruthSeg(end,:)';
 
-    % Measurement update
-    if mod(k, measStride) == 0
-        measBatch = zeros(3, measBatchCount);
-        for j = 1:measBatchCount
-            measBatch(:,j) = xTruth(1:3,k+1) + sigMeas*randn(3,1);
+        % EKF prediction
+        xAug0 = [xEst(:,k); reshape(eye(6), [36 1])];
+        [~, yPredSeg] = ode45( ...
+            @(tt,xx) bennuProp(tt, xx, muBennu, true, [0;0;0], u_k, 'full', false), ...
+            [tStation(k) tStation(k+1)], ...
+            xAug0, ...
+            opts);
+        ODE_timer_accum = ODE_timer_accum + toc(ODE_timer);
+        xBar = yPredSeg(end,1:6)';
+        phiPred = reshape(yPredSeg(end,7:42), [6 6]);
+        PBar = phiPred * PHist(:,:,k) * phiPred' + Q_ekf;
+
+        % Measurement update
+        if mod(k, measStride) == 0
+            measBatch = xTruth(1:3,k+1) + measNoiseAll(:,1:batchSize,k+1);
+
+            rawMeasHist(:,k+1) = measBatch(:,1);
+
+            blsTimer = tic;
+            [zBLS, R_bls] = BLS(measBatch, R_raw);
+            blsTimeAccum = blsTimeAccum + toc(blsTimer);
+
+            blsMeasHist(:,k+1) = zBLS;
+
+            innovation = zBLS - H_meas*xBar;
+            KGain = PBar * H_meas' / (H_meas*PBar*H_meas' + R_bls);
+
+            xEst(:,k+1) = xBar + KGain * innovation;
+            PHist(:,:,k+1) = PBar - KGain * H_meas * PBar;
+        else
+            xEst(:,k+1) = xBar;
+            PHist(:,:,k+1) = PBar;
         end
-
-        rawMeasHist(:,k+1) = measBatch(:,1);
-
-        [zBLS, R_bls] = BLS(measBatch, R_raw);
-        blsMeasHist(:,k+1) = zBLS;
-
-        innovation = zBLS - H_meas*xBar;
-        KGain = PBar * H_meas' / (H_meas*PBar*H_meas' + R_bls);
-
-        xEst(:,k+1) = xBar + KGain * innovation;
-        PHist(:,:,k+1) = PBar - KGain * H_meas * PBar;
-    else
-        xEst(:,k+1) = xBar;
-        PHist(:,:,k+1) = PBar;
     end
+    %ODE_timer_accum
+    runtimeTotal(iCase) = toc(totalTimer);
+    runtimeBLS(iCase) = blsTimeAccum;
+
+    % Error metrics
+    estErr = xTruth(1:3,:) - xEst(1:3,:);
+    estErrNorm = vecnorm(estErr, 2, 1);
+
+    rawMeasErr = xTruth(1:3,:) - rawMeasHist;
+    blsMeasErr = xTruth(1:3,:) - blsMeasHist;
+
+    validRaw = ~isnan(rawMeasErr(1,:));
+    validBLS = ~isnan(blsMeasErr(1,:));
+
+    rawNorm = vecnorm(rawMeasErr(:,validRaw), 2, 1);
+    blsNorm = vecnorm(blsMeasErr(:,validBLS), 2, 1);
+
+    rmsEstCases(iCase) = sqrt(mean(estErrNorm(validBLS).^2));
+    rmsRawCases(iCase) = sqrt(mean(rawNorm.^2));
+    rmsBLSCases(iCase) = sqrt(mean(blsNorm.^2));
+
+    fprintf('Batch %3d | Total %.3f s | BLS %.3f s | RMS Est %.4f m\n', ...
+        batchSize, runtimeTotal(iCase), runtimeBLS(iCase), rmsEstCases(iCase));
 end
 
+figure('Name','Batch Size Comparison');
+
+subplot(3,1,1)
+plot(measBatchCount, rmsEstCases, '-o', 'LineWidth', 1.5)
+grid on
+xlabel('measBatchCount')
+ylabel('RMS Est Error (m)')
+title('Estimation Accuracy vs Batch Size')
+
+subplot(3,1,2)
+plot(measBatchCount, runtimeBLS, '-o', 'LineWidth', 1.5)
+grid on
+xlabel('measBatchCount')
+ylabel('BLS-only Runtime (s)') 
+title('BLS Runtime vs Batch Size')
+
+subplot(3,1,3)
+plot(measBatchCount, runtimeTotal, '-o', 'LineWidth', 1.5)
+grid on
+xlabel('measBatchCount')
+ylabel('Total Runtime (s)')
+title('Total Runtime vs Batch Size')
+
+figure('Name','Measurement Quality vs Batch Size');
+plot(measBatchCount, rmsRawCases, '-o', 'LineWidth', 1.5, 'DisplayName', 'Raw RMS'); hold on
+plot(measBatchCount, rmsBLSCases, '-s', 'LineWidth', 1.5, 'DisplayName', 'BLS RMS')
+grid on
+xlabel('measBatchCount')
+ylabel('RMS Error (m)')
+title('Raw vs BLS Measurement Error')
+legend('Location','best')
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Open-loop truth for comparison
 [~, yOpen] = ode45( ...
     @(t,x) bennuProp(t, x, muBennu, false, [0;0;0], [0;0;0], 'full', false), ...
@@ -350,8 +424,8 @@ figure('Name','Trajectories: Full View');
 plot3(yRefAug(:,1), yRefAug(:,2), yRefAug(:,3), 'LineWidth', 1.5, ...
     'DisplayName', 'Reference Orbit');
 hold on
-plot3(yOpen(:,1), yOpen(:,2), yOpen(:,3), 'LineWidth', 1.5, ...
-    'DisplayName', 'Open-Loop Perturbed');
+% plot3(yOpen(:,1), yOpen(:,2), yOpen(:,3), 'LineWidth', 1.5, ...
+%     'DisplayName', 'Open-Loop Perturbed');
 plot3(yCtrl(:,1), yCtrl(:,2), yCtrl(:,3), '--', 'LineWidth', 1.5, ...
     'DisplayName', 'Closed-Loop Truth');
 plot3(yEst(:,1), yEst(:,2), yEst(:,3), ':', 'LineWidth', 1.5, ...
@@ -455,8 +529,8 @@ fprintf('\n------ Station-Keeping + EKF/BLS Summary ------\n');
 fprintf('Raw Measurement RMS Error:         %.4f m\n', rmsRawMeas);
 fprintf('BLS Measurement RMS Error:         %.4f m\n', rmsBLSMeas);
 fprintf('Closed-Loop Estimate RMS Error:    %.4f m\n', rmsEst);
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Part 3: Return Trip
 tfStation = tfStation/tStar;
 traveltime=14.5;
@@ -543,7 +617,7 @@ title('Optimal Input History')
 xlabel('Time (nondim)')
 ylabel('Input')
 grid()
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 function motion = BVP_ode_mass(t, x, rho, uMax)
 
     g0 = 1.654184883569765e+03;   % nondim
@@ -683,19 +757,16 @@ function dx = bennuProp(t, x, muBody, propSTM, aNoise, u, modelType, propBk)
     mSun = 1.989e30;
     mInAU = 1.496192602435979E+11;
 
-    r_ben2sun = [1.36 * mInAU; 0; 0];
+    r_ben2sun = [1.12 * mInAU; 0; 0];
     d = r_ben2sun - rVec;
 
     a_sun = G*mSun * ( d / norm(d)^3 - r_ben2sun / norm(r_ben2sun)^3 );
     daSun_dr = G*mSun * ( 3*(d*d')/norm(d)^5 - eye(3)/norm(d)^3 );
 
-    SF = 1353;
-    c = 3e8;
-    P_SR_1AU = SF/c;
-    P_SR = P_SR_1AU * (mInAU/norm(r_ben2sun))^2;
+    P_SR = 4.51*10^-6;
     c_R = 0.6;
-    A_exposed = 14;
-    mSC = 800;
+    mSC = 20;
+    A_exposed = 1;
 
     a_SRP = -P_SR*c_R*A_exposed*d/(mSC*norm(d));
     daSRP_dr = -P_SR*c_R*A_exposed/mSC * (d*d'/norm(d)^3 - eye(3)/norm(d));
