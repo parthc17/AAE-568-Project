@@ -16,7 +16,7 @@ orbit.raan = 0; orbit.w = 0; orbit.f = 0;
 [r0,v0] = keplerian2eci(orbit.a,orbit.e,orbit.i,orbit.raan,orbit.w,orbit.f,muBennu);
 x0 = [r0; v0];
 period = 2*pi*sqrt(orbit.a^3/muBennu); % s
-tf = 1*period;
+tf = period;
 steps = 201;
 t = linspace(0, tf, steps);
 dt = tf/steps;
@@ -28,13 +28,6 @@ mu_nd = 1;
 t_char = sqrt(1/muBennu * l_char^3);
 v_char = l_char/t_char;
 a_char = l_char/t_char^2;
-
-% l_char = 1;
-% % mu_char = muBennu;
-% mu_nd = muBennu;
-% t_char = 1;
-% v_char = l_char/t_char;
-% a_char = l_char/t_char^2;
 
 % NONDIM
 x_scale = [l_char, l_char, l_char, v_char, v_char, v_char]';
@@ -122,13 +115,14 @@ pp = patch('Faces', fv.ConnectivityList, ...
 
 plot3(y_g(1,:),y_g(2,:),y_g(3,:), DisplayName="BVP Guess"); 
 plot3(y_ref(1,:),y_ref(2,:),y_ref(3,:), DisplayName="Controlled Reference"); 
-legend();
+grid()
+legend(["Uncontrolled J2 Perturbed", "Uncontrolled All Perturbations", "Bennu Surface", "BVP Guess", "Controlled Trajectory"], FontSize=8, location="northeast");
 hold off;
 
 % Adjust view
 axis equal
 camlight headlight
-xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)'); title('Asteroid Orbit Control Truth'); 
+xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)'); title('TPBVP Trajectory'); 
 
 
 %% save ref for lqr

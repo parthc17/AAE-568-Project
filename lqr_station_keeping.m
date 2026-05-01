@@ -14,7 +14,7 @@ use min fuel
 
 %% Setup
 rng(1)
-sig_a_truth = 1e-6;   % Process Noise, m/s^2, tune this
+sig_a_truth = 1e-9;   % Process Noise, m/s^2, tune this (-7 default)
 muBennu = 5.2; % m^3/s^2
 tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
 % orbit = struct;
@@ -27,8 +27,8 @@ tol = 1e-12; opts = odeset('RelTol', tol, 'AbsTol', tol);
 % nt=5000;
 % t = linspace(0, tf, nt);
 nx = 6; nu = 3;
-periods = 10;
-tscale = 3600; 
+periods = 6;
+% tscale = 3600; 
 
 %% Reference traj
 % [t,y1] = ode45(@(t,x) bennuProp_old_ABC(t,x,muBennu), t, [r0;v0; reshape(eye(6),[nx^2 1]); reshape(zeros(nx, nu),[nx*nu 1])], opts); % target
@@ -68,10 +68,12 @@ for k = 1:(size(phi_hist, 3)-1)
 end
 
 % repeat for multiple orbits
+period = ref.traj.t(end);
 nt = (size(y1, 1)-1)*periods;
 dtk = ref.traj.t(2)-ref.traj.t(1);
 tf = periods * ref.traj.t(end);
 t = linspace(0, tf, tf/dtk);
+tscale = period;
 
 % repeat, but get rid of last one because it would duplicate IC and is 0
 Ak_hist = repmat(Ak_hist(:,:,1:end-1), 1, 1, periods);
@@ -84,21 +86,19 @@ u_ref = repmat(u_ref(:, 1:end-1), 1, periods);
 % R = diag([1,1,1]) * 1;
 
 max_pos_err = .5;      % m    - max acceptable position error
-max_vel_err = 0.02;    % m/s  - max acceptable velocity error  
+max_vel_err = 0.05;    % m/s  - max acceptable velocity error  
 max_u       = 1e-8;    % m/s^2 - max acceptable control input
 
 Q = diag(1 ./ [max_pos_err, max_pos_err, max_pos_err, ...
                max_vel_err, max_vel_err, max_vel_err].^2);
 R = diag(1 ./ [max_u, max_u, max_u].^2);
-Qf = Q; 
+Qf = Q*10; 
 
 K_hist = zeros(nu, nx, nt);
 Pk_hist = zeros(nx, nx, nt);
 Pk = Qf;
 Pk_hist(:,:,nt) = Qf;
 for k = nt-1:-1:1
-    % Ak = phi_hist(:,:,k+1) / phi_hist(:,:,k);
-    % Bk = Bk_factor(:,:,k+1) - Ak * Bk_factor(:,:,k);
     Ak = Ak_hist(:,:,k);
     Bk = Bk_hist(:,:,k);
 
@@ -121,29 +121,86 @@ x_mpc = zeros(nx, nt);
 u_hist_lqr = zeros(nu, nt-1);
 u_hist_mpc = zeros(nu, nt-1);
 
-% Perturbed initial condition
-% d0 = [0, 0, 0]';
-% x_lqr(:,1) = [r0 + d0; v0];
-% x_mpc(:,1) = [r0 + d0; v0];
 x_lqr(:,1) = x0;
 x_mpc(:,1) = x0;
 
+%% do controllers
+% kf settings
+use_kf = false; % this script doesn't work with kf, so keep this false
+xEst   = zeros(nx, nt);
+PHist = zeros(nx, nx, nt);
+PHist(:,:,1) = diag([10, 10, 10, 0.1, 0.1, 0.1]);
+aNoise = sig_a_truth * randn(3,nt);
+sigMeas = 2;                          % raw measurement std dev [m]
+measStride =2;                       % measurement every 2 steps, roughly 10 minutes
+measBatchCount = 100;                 % number of raw measurements per batch
+H_meas = [eye(3) zeros(3,3)];
+Q_ekf = diag([1e-6, 1e-6, 1e-6, 1e-10, 1e-10, 1e-10]);
+R_raw = sigMeas^2 * eye(3);
+
 % lqr
 tic;
+xk =  x_ref(1,:)';
+xEst(:,k) = xk;
 for k = 1:nt-1
     % tracking error at sample time tk
-    % err_k = x_lqr(:,k) - x_ref(k,:)';
+    err_k = x_lqr(:,k) - xk;
 
     % discrete-time TVLQR control
-    u_k = u_ref(:,k) - K_hist(:,:,k) * (x_lqr(:,k) - x_ref(k,:)');
+    u_k = u_ref(:,k) - K_hist(:,:,k) * (err_k);
     u_hist_lqr(:,k) = u_k;
     
     % Do propagation - hold control constant over [t(k), t(k+1)]
-    aNoise_k = sig_a_truth * randn(3,1);
+    aNoise_k = aNoise(:,k);
     [~, y_seg_lqr] = ode45(@(tt,xx) bennuProp_controlled(tt, xx, muBennu, aNoise_k, u_k), ...
                        [t(k) t(k+1)], x_lqr(:,k), opts);
 
     x_lqr(:,k+1) = y_seg_lqr(end,:)';
+
+    if use_kf
+        % EKF prediction: same control, no process noise
+        xAug0 = [xEst(:,k); reshape(eye(6), [36 1])];
+        % [~, yPredSeg] = ode45( ...
+        % %     @(tt,xx) bennuProp_old_ABC(tt, xx, muBennu, u_k), ...
+            % [t(k) t(k+1)], ...
+            % xAug0, ...
+            % opts);
+        [~, yPredSeg] = ode45( ...
+        @(tt,xx) bennuProp_kf(tt, xx, muBennu, true, [0;0;0], u_k, 'full', false), ...
+        [t(k) t(k+1)], ...
+        xAug0, ...
+        opts);
+    
+        xBar = yPredSeg(end,1:6)';
+        phiPred = reshape(yPredSeg(end,7:42), [6 6]);
+        PBar = phiPred * PHist(:,:,k) * phiPred' + Q_ekf;
+
+        % Measurement update
+        if mod(k, measStride) == 0
+            measBatch = zeros(3, measBatchCount);
+            for j = 1:measBatchCount
+                measBatch(:,j) = x_ref(1:3,k+1) + sigMeas*randn(3,1);
+            end
+    
+            rawMeasHist(:,k+1) = measBatch(:,1);
+    
+            [zBLS, R_bls] = BLS(measBatch, R_raw);
+            blsMeasHist(:,k+1) = zBLS;
+    
+            innovation = zBLS - H_meas*xBar;
+            KGain = PBar * H_meas' / (H_meas*PBar*H_meas' + R_bls);
+    
+            xEst(:,k+1) = xBar + KGain * innovation;
+            PHist(:,:,k+1) = PBar - KGain * H_meas * PBar;
+        else
+            xEst(:,k+1) = xBar;
+            PHist(:,:,k+1) = PBar;
+        end
+        xk =  xBar;
+    else
+        xk =  x_ref(k+1,:)';
+    end
+    
 end
 fprintf("LQR Time: %.2f s\n", toc)
 
@@ -193,7 +250,7 @@ subplot(2,1,1)
 plot(t/tscale, vecnorm(err1(:,1:3), 2, 2), 'LineWidth', 1.2), hold on
 plot(t/tscale, vecnorm(err2(:,1:3), 2, 2), 'LineWidth', 1.2), hold off
 grid on
-xlabel('Time (hours)')
+xlabel('Time (periods)')
 ylabel('Position Error (m)')
 title('Position Tracking Error')
 % legend('e_x', 'e_y', 'e_z', 'Location', 'best')
@@ -204,13 +261,17 @@ subplot(2,1,2)
 plot(t/tscale, vecnorm(err1(:,4:6), 2, 2), 'LineWidth', 1.2), hold on
 plot(t/tscale, vecnorm(err2(:,4:6), 2, 2), 'LineWidth', 1.2), hold off
 grid on
-xlabel('Time (s)')
+xlabel('Time (periods)')
 ylabel('Velocity Error (m/s)')
 title('Velocity Tracking Error')
 % legend('e_{v_x}', 'e_{v_y}', 'e_{v_z}', 'Location', 'best')
 legend(["LQR", "MPC"])
 fig = gcf();
 saveas(fig, "Controller_error.png")
+fprintf("LQR Position MSE: %.3f\n", sum(vecnorm(err1(:,1:3), 2, 2).^2)/nt)
+fprintf("MPC Position MSE: %.3f\n", sum(vecnorm(err2(:,1:3), 2, 2).^2)/nt)
+fprintf("LQR Velocity MSE: %.3e\n", sum(vecnorm(err1(:,4:6), 2, 2).^2)/nt)
+fprintf("MPC Velocity MSE: %.3e\n", sum(vecnorm(err2(:,4:6), 2, 2).^2)/nt)
 
 %% Control history plot
 % u_hist_lqr = u_ref - squeeze(pagemtimes(K_hist, reshape(err1', nx, 1, nt)));
@@ -219,7 +280,7 @@ figure('Name','LQR Control Correction vs Time');
 plot(t(1:end-1)/tscale, squeeze(vecnorm(u_hist_lqr, 2, 1)), 'LineWidth', 0.8), hold on
 plot(t(1:end-1)/tscale, squeeze(vecnorm(u_hist_mpc, 2, 1)), 'LineWidth', 0.8), hold off
 grid on
-xlabel('Time (hours)')
+xlabel('Time (periods)')
 ylabel('Control Acceleration (m/s^2)')
 title('LQR Control Correction History')
 % legend('u_x', 'u_y', 'u_z', 'Location', 'best')
@@ -227,6 +288,9 @@ legend(["LQR", "MPC"])
 
 fig = gcf();
 saveas(fig, "Controller_u.png")
+fprintf("LQR Position control: %.3e m/s /period\n", sum(vecnorm(u_hist_lqr, 2, 1))*dtk/periods)
+fprintf("MPC Position control: %.3e m/s /period\n", sum(vecnorm(u_hist_mpc, 2, 1))*dtk/periods)
+
 
 %% 3D trajectory comparison
 figure('Name','3D Trajectory Comparison');
@@ -321,7 +385,7 @@ function K = mpc_control_linearized(Ak_hist, Bk_hist, k, R, Q, P_N, N, kmax)
         for j = i:-1:1 % nonzero G cols or H rows
             % B = Bk_hist(k+i-1);
             G_row(:, j:(j+m-1)) = A_stack * Bk_hist(:,:,k+j-1);
-            if j ~= 1 % the last update of A_stack isn't used so don't compute it so it doesnt break the end
+            if j ~= 1 % the last update of A_stack isn't td so don't compute it so it doesnt break the end
                 A_stack = A_stack * Ak_hist(:,:,k+j);
             end
             % H(((i-1)*n+1):(i*n), :) = A^i;
@@ -412,4 +476,165 @@ function dx = bennuProp_controlled(t, x, muBody, aNoise_k, u)
     dx_nom = bennuProp(t, x, muBody, false, aNoise_k);  % nominal nonlinear dynamics
     B = [zeros(3,3); eye(3)];
     dx = dx_nom + B*u;
+end
+
+function [estimate, R_bls] = BLS(meas_batch, R)
+    m = size(meas_batch,2);
+
+    Y = reshape(meas_batch, [3*m,1]);
+    Hbig = kron(ones(m,1), eye(3));
+    Rbig = kron(eye(m), R);
+
+    estimate = (Hbig' / Rbig * Hbig) \ (Hbig' / Rbig * Y);
+    R_bls = inv(Hbig' / Rbig * Hbig);
+end
+
+function dx = bennuProp_kf(t, x, muBody, propSTM, aNoise, u, modelType, propBk)
+    % Consolidated Bennu propagator
+    %
+    % Inputs
+    %   t         - time
+    %   x         - state vector
+    %   muBody    - Bennu gravitational parameter
+    %   propSTM   - true/false, propagate STM
+    %   aNoise    - 3x1 process-noise acceleration
+    %   u         - 3x1 control acceleration
+    %   modelType - 'central', 'j2', or 'full'
+    %   propBk    - true/false, propagate Bk integral states (requires STM)
+    %
+    % State layouts supported:
+    %   6-state:   [r; v]
+    %   42-state:  [r; v; vec(Phi)]
+    %   60-state:  [r; v; vec(Phi); vec(BkInt)]
+
+    if nargin < 4 || isempty(propSTM)
+        propSTM = false;
+    end
+    if nargin < 5 || isempty(aNoise)
+        aNoise = [0;0;0];
+    end
+    if nargin < 6 || isempty(u)
+        u = [0;0;0];
+    end
+    if nargin < 7 || isempty(modelType)
+        modelType = 'full';
+    end
+    if nargin < 8 || isempty(propBk)
+        propBk = false;
+    end
+
+    % Basic state
+    rVec = x(1:3);
+    vVec = x(4:6);
+    r = norm(rVec);
+
+    % Constants
+    radBennu = 250;                 % m
+    j2 = 3.9257534110e-2;
+
+    % Base 2-body terms
+    a = -muBody * rVec / r^3;
+    dfdr = muBody * (3*rVec*rVec' / r^5 - eye(3)/r^3);
+
+    % Start state Jacobian
+    A = zeros(6,6);
+    A(1:3,4:6) = eye(3);
+    A(4:6,1:3) = dfdr;
+
+    % -------------------------
+    % J2 terms
+    % -------------------------
+    j2leadingTerm = (-3*muBody*j2*radBennu^2) / (2*r^5);
+    j2BCI = j2leadingTerm * [ ...
+        rVec(1)*(1-5*(rVec(3)^2/r^2));
+        rVec(2)*(1-5*(rVec(3)^2/r^2));
+        rVec(3)*(3-5*(rVec(3)^2/r^2)) ];
+
+    dj2dx = -3*muBody*j2*radBennu^2 / (2*r^5) * ...
+        [5*rVec(1)*(7*rVec(3)^2/r^2 - 1)/r^2 * rVec' + ...
+         (1-5*rVec(3)^2/r^2) * [1,0,0] - ...
+         10*rVec(1)*rVec(3)/r^2 * [0,0,1]];
+
+    dj2dy = -3*muBody*j2*radBennu^2 / (2*r^5) * ...
+        [5*rVec(2)*(7*rVec(3)^2/r^2 - 1)/r^2 * rVec' + ...
+         (1-5*rVec(3)^2/r^2) * [0,1,0] - ...
+         10*rVec(2)*rVec(3)/r^2 * [0,0,1]];
+
+    dj2dz = -3*muBody*j2*radBennu^2 / (2*r^5) * ...
+        [5*rVec(3)*(7*rVec(3)^2/r^2 - 3)/r^2 * rVec' + ...
+         3*(1-5*rVec(3)^2/r^2) * [0,0,1]];
+
+    dj2dr = [dj2dx; dj2dy; dj2dz];
+
+    % -------------------------
+    % Sun + SRP terms
+    % -------------------------
+    G = 6.674e-11;
+    mSun = 1.989e30;
+    mInAU = 1.496192602435979E+11;
+
+    r_ben2sun = [1.36 * mInAU; 0; 0];
+    d = r_ben2sun - rVec;
+
+    a_sun = G*mSun * ( d / norm(d)^3 - r_ben2sun / norm(r_ben2sun)^3 );
+    daSun_dr = G*mSun * ( 3*(d*d')/norm(d)^5 - eye(3)/norm(d)^3 );
+
+    SF = 1353;
+    c = 3e8;
+    P_SR_1AU = SF/c;
+    P_SR = P_SR_1AU * (mInAU/norm(r_ben2sun))^2;
+    c_R = 0.6;
+    A_exposed = 14;
+    mSC = 800;
+
+    a_SRP = -P_SR*c_R*A_exposed*d/(mSC*norm(d));
+    daSRP_dr = -P_SR*c_R*A_exposed/mSC * (d*d'/norm(d)^3 - eye(3)/norm(d));
+
+    % -------------------------
+    % Select model
+    % -------------------------
+    switch lower(modelType)
+        case 'central'
+            % already set from 2-body only
+
+        case 'j2'
+            a = a + j2BCI;
+            A(4:6,1:3) = dfdr + dj2dr;
+
+        case 'full'
+            a = a + j2BCI + a_sun + a_SRP;
+            A(4:6,1:3) = dfdr + dj2dr + daSun_dr + daSRP_dr;
+
+        otherwise
+            error('Unknown modelType: %s. Use ''central'', ''j2'', or ''full''.', modelType);
+    end
+
+    % Add noise and control
+    a = a + aNoise + u;
+
+    % -------------------------
+    % Output by state size / flags
+    % -------------------------
+    if ~propSTM
+        dx = [vVec; a];
+        return
+    end
+
+    % STM case
+    phi = reshape(x(7:42), [6 6]);
+    phiDot = A * phi;
+
+    if ~propBk
+        dx = [vVec; a; reshape(phiDot, [36 1])];
+        return
+    end
+
+    % STM + Bk integral case
+    B = [zeros(3,3); eye(3)];
+    BkDot = phi \ B;
+
+    dx = [vVec;
+          a;
+          reshape(phiDot, [36 1]);
+          reshape(BkDot, [18 1])];
 end
